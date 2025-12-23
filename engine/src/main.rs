@@ -35,7 +35,7 @@ async fn main() -> anyhow::Result<()> {
         .with_cpu(CpuRefreshKind::everything())
         .with_memory()
         .with_system();
-    let sys = System::new_with_specifics(refresh);
+    let sys = System::new_all();
 
     let state = AppState {
         version,
@@ -81,7 +81,7 @@ async fn spa_entry() -> impl IntoResponse {
     (
         StatusCode::OK,
         [(header::CONTENT_TYPE, "text/html")],
-        Html(include_str!("../../stub_index.html")),
+	Html(include_str!("../stub_index.html")),
     )
 }
 
@@ -104,8 +104,7 @@ async fn system_info(State(st): State<AppState>) -> Json<SystemInfo> {
     let hostname = sysinfo::System::host_name();
 
     let mut sys = st.sys.lock().await;
-    sys.refresh_cpu();
-    sys.refresh_system();
+    sys.refresh_all();
 
     let cpu_model = sys
         .cpus()
