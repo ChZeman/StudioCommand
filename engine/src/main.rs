@@ -8,7 +8,7 @@ use axum::{
     Json, Router,
 };
 use serde::Serialize;
-use sysinfo::{CpuRefreshKind, RefreshKind, System};
+use sysinfo::System;
 use tower_http::services::{ServeDir, ServeFile};
 use tracing::{info, warn};
 
@@ -31,10 +31,6 @@ async fn main() -> anyhow::Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("../web"));
 
-    let refresh = RefreshKind::nothing()
-        .with_cpu(CpuRefreshKind::everything())
-        .with_memory()
-        .with_system();
     let sys = System::new_all();
 
     let state = AppState {
