@@ -1,0 +1,18 @@
+[Unit]
+Description=StudioCommand Engine
+After=network.target
+
+[Service]
+Type=simple
+User=studiocommand
+Group=studiocommand
+WorkingDirectory=/opt/studiocommand/current
+Environment=STUDIOCOMMAND_BIND=127.0.0.1:3000
+Environment=STUDIOCOMMAND_WEB_ROOT=/opt/studiocommand/current/web
+ExecStart=/opt/studiocommand/current/studiocommand-engine
+Restart=on-failure
+RestartSec=2
+Nice=-5
+
+[Install]
+WantedBy=multi-user.target
