@@ -78,8 +78,11 @@ fn build_router(state: AppState) -> Router {
 }
 
 async fn spa_entry() -> impl IntoResponse {
-    // If web root is present, the fallback ServeDir will serve the real index.html.
-    (StatusCode::OK, [(header::CONTENT_TYPE, "text/html")], Html(include_str!("../stub_index.html")))
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/html")],
+        Html(include_str!("../../stub_index.html")),
+    )
 }
 
 #[derive(Serialize)]
