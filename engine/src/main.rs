@@ -171,11 +171,23 @@ async fn playout_tick(playout: Arc<tokio::sync::RwLock<PlayoutState>>) {
 
             // Promote new playing item from top of log.
             if let Some(first) = p.log.get_mut(0) {
+                // Mark the first log item as playing. We must avoid holding a mutable
+                // borrow of `first` while also mutating `p.now` (Rust borrow rules).
                 first.state = "playing".into();
-                p.now.title = first.title.clone();
-                p.now.artist = first.artist.clone();
+
+                // Clone the fields we need *while* we have access to `first`...
+                let title = first.title.clone();
+                let artist = first.artist.clone();
+                let dur = first.dur.clone();
+
+                // ...then explicitly end the `first` borrow before touching `p.now`.
+                drop(first);
+
+                p.now.title = title;
+                p.now.artist = artist;
+
                 // crude parse of M:SS
-                if let Some((m,s)) = first.dur.split_once(":") {
+                if let Some((m,s)) = dur.split_once(":") {
                     if let (Ok(m), Ok(s)) = (m.parse::<u32>(), s.parse::<u32>()) {
                         p.now.dur = m*60 + s;
                     }
