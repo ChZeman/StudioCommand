@@ -196,8 +196,8 @@ async function fetchStatus(){
     state.lastStatusError = null;
 
     setApiBadge("LIVE");
-    render();
-  }catch(e){
+    if (typeof window.SC_render === "function") window.SC_render();
+}catch(e){
     state.lastStatusError = (e && e.message) ? e.message : String(e);
 
     const lastOk = state.lastStatusAt || 0;
@@ -211,8 +211,8 @@ async function fetchStatus(){
       setApiBadge("DEMO", `DEMO (API error: ${state.lastStatusError})`);
     }
 
-    render();
-  }
+    if (typeof window.SC_render === "function") window.SC_render();
+}
 }
 
 
