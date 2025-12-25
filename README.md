@@ -19,7 +19,7 @@ cargo run
 ## Packaging
 See `packaging/` for `install.sh`, `studiocommand.service`, and an nginx template.
 
-## One-liner installer (Node-RED style)
+## One-liner installer
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ChZeman/StudioCommand/main/packaging/install-online.sh | \

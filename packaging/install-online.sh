@@ -1,8 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# NOTE ABOUT INTERACTIVE PROMPTS
+# When executed as `curl ... | sudo bash`, stdin is a pipe (not a terminal).
+# To still allow user prompts, we read from /dev/tty when available.
+TTY_IN="/dev/tty"
+HAVE_TTY="false"
+if [[ -r "${TTY_IN}" ]]; then
+  HAVE_TTY="true"
+fi
+
 ###############################################################################
-# StudioCommand "one-liner" online installer (Node-RED style)
+# StudioCommand "one-liner" online installer 
 #
 # Typical usage:
 #   curl -fsSL https://raw.githubusercontent.com/ChZeman/StudioCommand/main/packaging/install-online.sh | \
@@ -68,7 +77,11 @@ prompt() {
     prompt_text+=" [${default_value}]"
   fi
   prompt_text+=": "
-  read -r -p "${prompt_text}" input || true
+  if [[ "${HAVE_TTY}" == "true" ]]; then
+    read -r -p "${prompt_text}" input < "${TTY_IN}" || true
+  else
+    read -r -p "${prompt_text}" input || true
+  fi
   if [[ -z "${input}" ]]; then
     input="${default_value}"
   fi
@@ -81,7 +94,11 @@ confirm() {
     return 0
   fi
   echo
-  read -r -p "${message} [y/N]: " ans || true
+  if [[ "${HAVE_TTY}" == "true" ]]; then
+    read -r -p "${message} [y/N]: " ans < "${TTY_IN}" || true
+  else
+    read -r -p "${message} [y/N]: " ans || true
+  fi
   [[ "${ans}" == "y" || "${ans}" == "Y" ]]
 }
 
