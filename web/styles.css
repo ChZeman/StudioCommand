@@ -417,3 +417,9 @@ kbd{
   color:var(--muted2);
 }
 .p-stats b{color:var(--text); font-weight:900}
+
+
+/* Live/Demo indicator */
+.badge-live{background:rgba(69,255,145,.14); border:1px solid rgba(69,255,145,.35); color:rgba(155,255,196,1)}
+.badge-demo{background:rgba(255,209,102,.14); border:1px solid rgba(255,209,102,.35); color:rgba(255,224,160,1)}
+.badge-stale{background:rgba(255,92,92,.14); border:1px solid rgba(255,92,92,.35); color:rgba(255,170,170,1)}

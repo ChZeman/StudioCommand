@@ -25,6 +25,7 @@ const state = {
   now: { title: "", artist: "", dur: 180, pos: 0, ends: "" },
   apiLive: false,
   lastStatusError: null,
+  lastStatusAt: 0,
 };
 
 function pad(n){ return String(n).padStart(2,'0');}
@@ -127,11 +128,45 @@ function initData(){
   refillLog();
 }
 
+
+function renderApiBadge(){
+  const el = qs("#apiBadge");
+  if(!el) return;
+
+  // If we've never had a successful API response, we are in DEMO mode.
+  if(!state.apiLive){
+    el.textContent = "DEMO";
+    el.classList.remove("badge-live","badge-stale");
+    el.classList.add("badge-demo");
+    el.title = state.lastStatusError ? `DEMO (API error: ${state.lastStatusError})` : "DEMO (using local UI data)";
+    return;
+  }
+
+  // We are LIVE. If data hasn't updated recently, mark as stale.
+  const age = Date.now() - (state.lastStatusAt || 0);
+  if(age > 5000){
+    el.textContent = "LIVE (STALE)";
+    el.classList.remove("badge-live","badge-demo");
+    el.classList.add("badge-stale");
+    el.title = `LIVE (last update ${Math.round(age/1000)}s ago)`;
+  }else{
+    el.textContent = "LIVE";
+    el.classList.remove("badge-demo","badge-stale");
+    el.classList.add("badge-live");
+    el.title = "LIVE (driven by /api/v1/status)";
+  }
+}
+
 async function fetchStatus(){
   try{
     const r = await fetch("/api/v1/status", { cache: "no-store" });
     if(!r.ok) throw new Error(`HTTP ${r.status}`);
     const data = await r.json();
+
+    state.apiLive = true;
+    state.lastStatusAt = Date.now();
+    state.lastStatusError = null;
+    renderApiBadge();
 
     // Mark API live: stop local simulation from diverging.
     state.apiLive = true;
@@ -168,7 +203,11 @@ async function fetchStatus(){
   }catch(err){
     // If the API is temporarily unavailable, keep the demo UI alive.
     state.lastStatusError = String(err);
-    // Do not flip apiLive back to false; this prevents jitter if the API blips.
+    // If we lose the API for more than a few seconds, drop back to DEMO so the operator can tell.
+    if(state.lastStatusAt === 0 || (Date.now() - state.lastStatusAt) > 5000){
+      state.apiLive = false;
+    }
+    renderApiBadge();
   }
 }
 
@@ -597,6 +636,7 @@ function simulateStatus(){
 }
 
 initData();
+renderApiBadge();
 wireUI();
 applyRole();
 renderLog();
