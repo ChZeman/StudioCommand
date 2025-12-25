@@ -135,6 +135,6 @@ systemctl reload nginx
 echo
 echo "[✓] Installed."
 echo "    Engine (internal):  http://127.0.0.1:3000"
-echo "    Nginx (public):     https://${DOMAIN}:9443"
+echo "    Nginx (public, serves UI + proxies API):     https://${DOMAIN}:9443"
 echo
 echo "Firewall reminder: allow 9443/tcp (and 80/tcp if using redirect/ACME). Keep 3000 closed externally."

@@ -48,3 +48,13 @@ Releases include the browser UI (`index.html` + assets). GitHub Actions builds t
 
 Releases include the browser UI (`index.html` + assets) from the `web/` directory. At the moment the UI is packaged as static files
 (no Node build step required yet).
+
+
+## Serving model
+
+StudioCommand uses a split model:
+
+- **Nginx** serves the browser UI directly from disk (`/opt/studiocommand/current/web`).
+- The **engine** listens privately on `127.0.0.1:3000` and serves the API (`/api/*`) and WebSockets (`/ws/*`).
+
+This keeps UI deployment simple and avoids coupling the Rust binary to frontend assets.

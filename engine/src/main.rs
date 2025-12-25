@@ -27,6 +27,12 @@ struct AppState {
     sys: Arc<tokio::sync::Mutex<System>>,
 }
 
+
+
+/// Root endpoint: UI is served by nginx; the engine focuses on API/WebSocket.
+async fn root() -> &'static str {
+    "StudioCommand engine is running. UI is served by nginx."
+}
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -54,7 +60,6 @@ let state = AppState {
         .parse()?;
 
     info!("StudioCommand engine starting on http://{addr}");
-    info!("Serving web from: {}", web_root.display());
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app)
@@ -74,7 +79,7 @@ fn build_router(state: AppState) -> Router {
         .route("/api/v1/system/info", get(system_info))
         .route("/admin/api/v1/updates/status", get(update_status))
         // SPA entry points (same UI bundle in v0)
-        .route("/", get(spa_entry))
+        .route("/", get(root))
         .route("/admin", get(spa_entry))
         .route("/remote", get(spa_entry))
         .fallback_service(serve_dir)

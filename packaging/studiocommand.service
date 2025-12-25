@@ -8,6 +8,7 @@ User=studiocommand
 Group=studiocommand
 WorkingDirectory=/opt/studiocommand/current
 Environment=STUDIOCOMMAND_BIND=127.0.0.1:3000
+# UI assets are served by nginx; the engine provides the API.
 Environment=STUDIOCOMMAND_WEB_ROOT=/opt/studiocommand/current/web
 ExecStart=/opt/studiocommand/current/studiocommand-engine
 Restart=on-failure
