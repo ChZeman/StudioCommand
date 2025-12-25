@@ -30,3 +30,10 @@ curl -fsSL https://raw.githubusercontent.com/ChZeman/StudioCommand/main/packagin
 - If `--domain` is omitted, the installer will prompt for it.
 - If `--email` is omitted, the installer uses a **self-signed** certificate (browser warning) for quick testing.
 - StudioCommand is served via **nginx HTTPS on port 8443**.
+
+
+## Releases + checksums
+
+- Pushing a tag like `v0.1.0` triggers GitHub Actions to **build x86_64 + aarch64**, generate a merged `sha256sums.txt`,
+  and **publish a GitHub Release automatically** with all three files attached.
+- `packaging/install-online.sh` will verify `sha256sums.txt` when it is present in the Release.
