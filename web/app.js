@@ -164,6 +164,17 @@ function renderApiBadge(){
 
 
 
+
+async function postAction(path){
+  // Small helper for operator controls. We keep it simple for now (no auth yet).
+  const r = await fetch(path, { method: "POST", headers: { "content-type": "application/json" } });
+  if(!r.ok){
+    const t = await r.text().catch(()=> "");
+    throw new Error(`HTTP ${r.status} ${t}`);
+  }
+  return r.json().catch(()=> ({}));
+}
+
 async function fetchStatus(){
   try{
     const r = await fetch("/api/v1/status", { cache: "no-store" });
@@ -630,9 +641,38 @@ function simulateStatus(){
   renderProducers();
 }
 
+
+function wireTransportControls(){
+  const btnSkip = qs("#btnSkip");
+  const btnDump = qs("#btnDump");
+  const btnReload = qs("#btnReload");
+
+  async function run(btn, path){
+    if(!btn) return;
+    const prev = btn.disabled;
+    btn.disabled = true;
+    try{
+      await postAction(path);
+      // Pull fresh status immediately so the UI reflects the action without waiting.
+      await fetchStatus();
+    }catch(e){
+      console.error(e);
+      alert(`Action failed: ${e && e.message ? e.message : e}`);
+    }finally{
+      btn.disabled = prev;
+    }
+  }
+
+  if(btnSkip) btnSkip.addEventListener("click", ()=> run(btnSkip, "/api/v1/transport/skip"));
+  if(btnDump) btnDump.addEventListener("click", ()=> run(btnDump, "/api/v1/transport/dump"));
+  if(btnReload) btnReload.addEventListener("click", ()=> run(btnReload, "/api/v1/transport/reload"));
+}
+
+
 initData();
 setHeaderVersion();
 setApiBadge("DEMO");
+wireTransportControls();
 fetchStatus();
 setInterval(fetchStatus, 1000);
 renderApiBadge();

@@ -1,3 +1,4 @@
+use serde_json::json;
 use std::{net::SocketAddr, sync::Arc};
 
 // StudioCommand engine (v0)
@@ -10,7 +11,7 @@ use std::{net::SocketAddr, sync::Arc};
 
 use axum::{
     extract::State,
-            routing::get,
+            routing::{get, post},
     Json, Router,
 };
 use serde::Serialize;
@@ -332,4 +333,96 @@ async fn shutdown_signal() {
     }
 
     warn!("Shutdown signal received.");
+}
+
+
+
+async fn api_transport_skip(State(state): State<AppState>) -> Json<serde_json::Value> {
+    // "Skip" advances immediately to the next item in the playout log.
+    let mut p = state.playout.lock().await;
+    advance_to_next(&mut p, Some("skipped"));
+    Json(json!({"ok": true}))
+}
+
+async fn api_transport_dump(State(state): State<AppState>) -> Json<serde_json::Value> {
+    // "Dump" is an operator action to instantly remove the current playing item.
+    // In this stub engine, we treat it as "skip with reason=dumped".
+    let mut p = state.playout.lock().await;
+    advance_to_next(&mut p, Some("dumped"));
+    Json(json!({"ok": true}))
+}
+
+async fn api_transport_reload(State(state): State<AppState>) -> Json<serde_json::Value> {
+    // "Reload" repopulates the in-memory demo log.
+    let mut p = state.playout.lock().await;
+    reset_demo_playout(&mut p);
+    Json(json!({"ok": true}))
+}
+
+fn reset_demo_playout(p: &mut PlayoutState) {
+    // Keep this deterministic so the UI is predictable while we build real scheduling.
+    p.now.title = "Lean On Me".into();
+    p.now.artist = "Club Nouveau".into();
+    p.now.dur = 3*60 + 48;
+    p.now.pos = 0;
+
+    p.log = vec![
+        LogItem{ tag:"MUS".into(), time:"15:33".into(), title:"Lean On Me".into(), artist:"Club Nouveau".into(), state:"playing".into(), dur:"3:48".into(), cart:"080-0599".into() },
+        LogItem{ tag:"MUS".into(), time:"15:37".into(), title:"Bette Davis Eyes".into(), artist:"Kim Carnes".into(), state:"queued".into(), dur:"3:30".into(), cart:"080-6250".into() },
+        LogItem{ tag:"MUS".into(), time:"15:41".into(), title:"Talk Dirty To Me".into(), artist:"Poison".into(), state:"queued".into(), dur:"3:42".into(), cart:"080-4577".into() },
+        LogItem{ tag:"EVT".into(), time:"15:45".into(), title:"TOH Legal ID".into(), artist:"".into(), state:"locked".into(), dur:"0:10".into(), cart:"ID-TOH".into() },
+        LogItem{ tag:"MUS".into(), time:"15:46".into(), title:"Jessie's Girl".into(), artist:"Rick Springfield".into(), state:"queued".into(), dur:"3:07".into(), cart:"080-1591".into() },
+    ];
+
+    // Ensure "next" is marked consistently.
+    if p.log.len() > 1 {
+        p.log[1].state = "next".into();
+    }
+}
+
+fn parse_dur_to_sec(d: &str) -> u32 {
+    if let Some((m,s)) = d.split_once(":") {
+        if let (Ok(m), Ok(s)) = (m.parse::<u32>(), s.parse::<u32>()) {
+            return m*60 + s;
+        }
+    }
+    0
+}
+
+fn advance_to_next(p: &mut PlayoutState, reason: Option<&str>) {
+    // Mark and remove the current playing item, then promote the next queued item.
+    if !p.log.is_empty() {
+        // remove the first item (assumed playing)
+        let mut removed = p.log.remove(0);
+        if let Some(r) = reason {
+            removed.state = r.into();
+        } else {
+            removed.state = "played".into();
+        }
+    }
+
+    // Promote new first item
+    if let Some(first) = p.log.get_mut(0) {
+        first.state = "playing".into();
+        p.now.title = first.title.clone();
+        p.now.artist = first.artist.clone();
+        p.now.dur = parse_dur_to_sec(&first.dur);
+        p.now.pos = 0;
+    } else {
+        // Empty log: clear now
+        p.now.title = "".into();
+        p.now.artist = "".into();
+        p.now.dur = 0;
+        p.now.pos = 0;
+    }
+
+    // Maintain "next" marker
+    if p.log.len() > 1 {
+        p.log[1].state = "next".into();
+        for i in 2..p.log.len() {
+            if p.log[i].state == "next" {
+                p.log[i].state = "queued".into();
+            }
+        }
+    }
 }
