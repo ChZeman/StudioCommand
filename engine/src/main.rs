@@ -131,6 +131,7 @@ fn build_router(state: AppState) -> Router {
         .route("/", get(root))
         .route("/health", get(|| async { "OK" }))
         .route("/api/v1/status", get(status))
+        .route("/api/v1/ping", get(ping))
         .route("/api/v1/system/info", get(system_info))
         .route("/admin/api/v1/update/status", get(update_status))
         .with_state(state)
@@ -245,6 +246,16 @@ struct SystemInfo {
     load_15m: f32,
     temp_c: Option<f32>,
     hostname: Option<String>,
+}
+
+
+
+async fn ping(State(state): State<AppState>) -> Json<serde_json::Value> {
+    Json(json!({
+        "ok": true,
+        "version": state.version,
+        "features": ["status", "transport"]
+    }))
 }
 
 async fn system_info(State(st): State<AppState>) -> Json<SystemInfo> {
