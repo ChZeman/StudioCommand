@@ -41,6 +41,24 @@ DOMAIN=""            # required
 EMAIL=""             # optional; enables Let's Encrypt
 NONINTERACTIVE="false"
 
+
+detect_default_domain() {
+  local d=""
+  d="$(hostname -f 2>/dev/null || true)"
+  if [[ -z "${d}" || "${d}" == "(none)" ]]; then
+    d="$(hostname 2>/dev/null || true)"
+  fi
+  if [[ -z "${d}" ]]; then
+    d="localhost"
+  fi
+  echo "${d}"
+}
+
+looks_like_domain() {
+  local d="$1"
+  [[ "${d}" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$ ]]
+}
+
 usage() {
   cat <<EOF
 StudioCommand online installer
@@ -157,8 +175,8 @@ if [[ -z "${DOMAIN}" ]]; then
   prompt DOMAIN "Enter the hostname for StudioCommand (DNS should point to this server)"
 fi
 if [[ -z "${DOMAIN}" ]]; then
-  echo "ERROR: --domain is required."
-  exit 1
+  DOMAIN="$(detect_default_domain)"
+  echo "[*] No --domain provided; defaulting to: ${DOMAIN}"
 fi
 
 if [[ -z "${EMAIL}" && "${NONINTERACTIVE}" != "true" ]]; then
