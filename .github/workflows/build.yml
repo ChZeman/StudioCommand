@@ -26,28 +26,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Build the React UI during CI so releases always include index.html + assets.
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-          cache: "npm"
-          cache-dependency-path: web/package-lock.json
-
-      - name: Build web UI
-        run: |
-          cd web
-          if [ -f package-lock.json ]; then
-            npm ci
-          else
-            npm install
-          fi
-          npm run build
-
-          echo "Web build outputs:"
-          if [ -d dist ]; then ls -la dist | head -n 50; fi
-          if [ -d build ]; then ls -la build | head -n 50; fi
-
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -78,16 +56,8 @@ jobs:
           cp packaging/nginx-studiocommand.conf pkg/studiocommand/nginx/nginx-studiocommand.conf
           echo "$VERSION" > pkg/studiocommand/VERSION
 
-          # Copy built UI output into the package.
-          # Vite builds to dist/, CRA builds to build/.
-          if [[ -d "web/dist" ]]; then
-            cp -a web/dist/. pkg/studiocommand/web/
-          elif [[ -d "web/build" ]]; then
-            cp -a web/build/. pkg/studiocommand/web/
-          else
-            echo "ERROR: Web build output not found (expected web/dist or web/build)."
-            exit 1
-          fi
+          # Package static web UI (no Node build required yet).
+          cp -a web/. pkg/studiocommand/web/
 
           # Ensure the packaged web root has an index.html
           test -f pkg/studiocommand/web/index.html

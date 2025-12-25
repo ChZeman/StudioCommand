@@ -38,7 +38,13 @@ curl -fsSL https://raw.githubusercontent.com/ChZeman/StudioCommand/main/packagin
   and **publish a GitHub Release automatically** with all three files attached.
 - `packaging/install-online.sh` will verify `sha256sums.txt` when it is present in the Release.
 
-## Packaging note (web UI)
+
 
 Releases include the browser UI (`index.html` + assets). GitHub Actions builds the web UI during CI and packages the build output
 (`web/dist` for Vite or `web/build` for CRA) into the release tarballs.
+
+
+## Packaging note (web UI)
+
+Releases include the browser UI (`index.html` + assets) from the `web/` directory. At the moment the UI is packaged as static files
+(no Node build step required yet).
