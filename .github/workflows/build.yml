@@ -26,6 +26,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Build the React UI during CI so releases always include index.html + assets.
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build web UI
+        run: |
+          cd web
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
+          npm run build
+
+          echo "Web build outputs:"
+          if [ -d dist ]; then ls -la dist | head -n 50; fi
+          if [ -d build ]; then ls -la build | head -n 50; fi
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -39,7 +61,6 @@ jobs:
 
       - name: Build engine
         env:
-          # Ensure we link with the correct cross toolchain for aarch64 builds.
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
           CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
           AR_aarch64_unknown_linux_gnu: aarch64-linux-gnu-ar
@@ -53,14 +74,26 @@ jobs:
           mkdir -p dist pkg/studiocommand/web pkg/studiocommand/systemd pkg/studiocommand/nginx
 
           cp engine/target/${{ matrix.target }}/release/studiocommand-engine pkg/studiocommand/
-          cp -a web/. pkg/studiocommand/web/
           cp packaging/studiocommand.service pkg/studiocommand/systemd/
           cp packaging/nginx-studiocommand.conf pkg/studiocommand/nginx/nginx-studiocommand.conf
           echo "$VERSION" > pkg/studiocommand/VERSION
 
+          # Copy built UI output into the package.
+          # Vite builds to dist/, CRA builds to build/.
+          if [[ -d "web/dist" ]]; then
+            cp -a web/dist/. pkg/studiocommand/web/
+          elif [[ -d "web/build" ]]; then
+            cp -a web/build/. pkg/studiocommand/web/
+          else
+            echo "ERROR: Web build output not found (expected web/dist or web/build)."
+            exit 1
+          fi
+
+          # Ensure the packaged web root has an index.html
+          test -f pkg/studiocommand/web/index.html
+
           tar -czf dist/${{ matrix.pkg }} -C pkg studiocommand
 
-          # Produce a per-arch checksum file. We'll merge these later into a single sha256sums.txt.
           (cd dist && sha256sum ${{ matrix.pkg }} > sha256sums-${{ matrix.arch }}.txt)
 
           ls -lh dist
@@ -92,11 +125,9 @@ jobs:
       - name: Merge sha256 sums into one file
         run: |
           mkdir -p dist
-          # Copy tarballs into a single dist/ directory for the release job.
           cp -f dist-x86_64/*.tar.gz dist/
           cp -f dist-aarch64/*.tar.gz dist/
 
-          # Merge checksum lines (one per tarball) into sha256sums.txt.
           cat dist-x86_64/sha256sums-*.txt dist-aarch64/sha256sums-*.txt > dist/sha256sums.txt
 
           echo "Merged checksums:"
