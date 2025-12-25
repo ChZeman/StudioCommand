@@ -247,10 +247,18 @@ function renderProducers(){
     stats.className = "p-stats";
     stats.innerHTML = `<span>Jitter <b>${p.jitter}</b></span><span>Loss <b>${p.loss}</b></span>`;
 
+    // Footer row: status pills + jitter/loss live together beneath the meter.
+    // This avoids the "sometimes shifts" behavior that can happen when right-side
+    // elements are vertically centered in the main flex row at wider breakpoints.
+    const footer = document.createElement("div");
+    footer.className = "p-footer";
+    footer.appendChild(pills);
+    footer.appendChild(stats);
+
+    main.appendChild(footer);
+
     row.appendChild(av);
     row.appendChild(main);
-    row.appendChild(pills);
-    row.appendChild(stats);
     el.appendChild(row);
   });
 }
