@@ -10,17 +10,13 @@ use std::{net::SocketAddr, sync::Arc};
 
 use axum::{
     extract::State,
-    http::{header, StatusCode},
-    response::{Html, IntoResponse},
-    routing::get,
+            routing::get,
     Json, Router,
 };
 use serde::Serialize;
 use sysinfo::System;
-use tower_http::services::{ServeDir, ServeFile};
 use tracing::{info, warn};
 
-#[derive(Clone)]
 #[derive(Clone)]
 struct AppState {
     version: String,
