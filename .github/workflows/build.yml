@@ -31,13 +31,9 @@ jobs:
         if: matrix.arch == 'aarch64'
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+          sudo apt-get install -y gcc-aarch64-linux-gnu
 
       - name: Build engine
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
-          AR_aarch64_unknown_linux_gnu: aarch64-linux-gnu-ar
         run: |
           cd engine
           cargo build --release --target ${{ matrix.target }}
@@ -49,6 +45,8 @@ jobs:
           cp engine/target/${{ matrix.target }}/release/studiocommand-engine pkg/studiocommand/
           cp -a web/. pkg/studiocommand/web/
           cp packaging/studiocommand.service pkg/studiocommand/systemd/
+          mkdir -p pkg/studiocommand/nginx
+          cp packaging/nginx-studiocommand.conf pkg/studiocommand/nginx/nginx-studiocommand.conf
           echo "$VERSION" > pkg/studiocommand/VERSION
           tar -czf dist/${{ matrix.pkg }} -C pkg studiocommand
           ls -lh dist

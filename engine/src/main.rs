@@ -1,5 +1,13 @@
 use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
+// StudioCommand engine (v0)
+//
+// This service intentionally stays small at first:
+//   - Serve the browser UI (static files)
+//   - Provide a few JSON endpoints for system status
+//   - Run behind a reverse proxy (nginx) for HTTPS and internet exposure
+
+
 use axum::{
     extract::State,
     http::{header, StatusCode},
@@ -8,7 +16,7 @@ use axum::{
     Json, Router,
 };
 use serde::Serialize;
-use sysinfo::System;
+use sysinfo::{CpuRefreshKind, RefreshKind, System};
 use tower_http::services::{ServeDir, ServeFile};
 use tracing::{info, warn};
 
@@ -31,7 +39,11 @@ async fn main() -> anyhow::Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("../web"));
 
-    let sys = System::new_all();
+    let refresh = RefreshKind::nothing()
+        .with_cpu(CpuRefreshKind::everything())
+        .with_memory()
+        .with_system();
+    let sys = System::new_with_specifics(refresh);
 
     let state = AppState {
         version,
@@ -59,6 +71,7 @@ async fn main() -> anyhow::Result<()> {
 
 fn build_router(state: AppState) -> Router {
     let index = state.web_root.join("index.html");
+    // ServeDir serves static UI assets. not_found_service() provides SPA fallback so deep links work.
     let serve_dir = ServeDir::new(state.web_root.clone()).not_found_service(ServeFile::new(index));
 
     Router::new()
@@ -74,11 +87,8 @@ fn build_router(state: AppState) -> Router {
 }
 
 async fn spa_entry() -> impl IntoResponse {
-    (
-        StatusCode::OK,
-        [(header::CONTENT_TYPE, "text/html")],
-	Html(include_str!("../stub_index.html")),
-    )
+    // If web root is present, the fallback ServeDir will serve the real index.html.
+    (StatusCode::OK, [(header::CONTENT_TYPE, "text/html")], Html(include_str!("../stub_index.html")))
 }
 
 #[derive(Serialize)]
@@ -100,7 +110,8 @@ async fn system_info(State(st): State<AppState>) -> Json<SystemInfo> {
     let hostname = sysinfo::System::host_name();
 
     let mut sys = st.sys.lock().await;
-    sys.refresh_all();
+    sys.refresh_cpu();
+    sys.refresh_system();
 
     let cpu_model = sys
         .cpus()

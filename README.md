@@ -18,3 +18,15 @@ cargo run
 
 ## Packaging
 See `packaging/` for `install.sh`, `studiocommand.service`, and an nginx template.
+
+## One-liner installer (Node-RED style)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ChZeman/StudioCommand/main/packaging/install-online.sh | \
+  sudo bash -s -- --domain studiocommand.yourstation.org --email you@yourstation.org
+```
+
+- If `--version` is omitted, the installer will propose the **latest** GitHub Release and ask you to confirm.
+- If `--domain` is omitted, the installer will prompt for it.
+- If `--email` is omitted, the installer uses a **self-signed** certificate (browser warning) for quick testing.
+- StudioCommand is served via **nginx HTTPS on port 8443**.
