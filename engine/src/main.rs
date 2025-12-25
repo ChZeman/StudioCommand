@@ -125,7 +125,6 @@ tokio::spawn(playout_tick(state.playout.clone()));
 
 fn build_router(state: AppState) -> Router {
     Router::new()
-        .route("/api/v1/status", get(api_status))
         .route("/api/v1/transport/skip", post(api_transport_skip))
         .route("/api/v1/transport/dump", post(api_transport_dump))
         .route("/api/v1/transport/reload", post(api_transport_reload))
