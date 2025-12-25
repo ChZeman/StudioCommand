@@ -129,6 +129,7 @@ function initData(){
 }
 
 
+
 function renderApiBadge(){
   const el = qs("#apiBadge");
   if(!el) return;
@@ -136,7 +137,6 @@ function renderApiBadge(){
   const lastOk = state.lastStatusAt || 0;
   const ageMs = lastOk ? (Date.now() - lastOk) : Infinity;
 
-  // LIVE if we've ever had a successful API fetch.
   if(lastOk > 0){
     if(ageMs > 5000){
       el.textContent = "LIVE (STALE)";
@@ -152,12 +152,13 @@ function renderApiBadge(){
     return;
   }
 
-  // Otherwise: DEMO (never successfully reached API)
   el.textContent = "DEMO";
   el.classList.remove("badge-live","badge-stale");
   el.classList.add("badge-demo");
   el.title = state.lastStatusError ? `DEMO (API error: ${state.lastStatusError})` : "DEMO (using local UI data)";
 }
+
+
 
 
 async function fetchStatus(){
@@ -166,49 +167,18 @@ async function fetchStatus(){
     if(!r.ok) throw new Error(`HTTP ${r.status}`);
     const data = await r.json();
 
-    state.apiLive = true;
+    state.status = data;
     state.lastStatusAt = Date.now();
     state.lastStatusError = null;
-    renderApiBadge();
 
-    // Mark API live: stop local simulation from diverging.
-    state.apiLive = true;
-    state.lastStatusError = null;
-
-    // Map API payload into the UI state shape.
-    if(data.now){
-      state.now.title = data.now.title || "";
-      state.now.artist = data.now.artist || "";
-      state.now.dur = data.now.dur || 0;
-      state.now.pos = data.now.pos || 0;
-    }
-    if(Array.isArray(data.log)){
-      state.log = data.log.map(it => ({
-        ...it,
-        // Ensure required fields exist for renderer:
-        tag: it.tag ?? "MUS",
-        time: it.time ?? "",
-        title: it.title ?? "",
-        artist: it.artist ?? "",
-        state: it.state ?? "queued",
-        dur: it.dur ?? "0:00",
-        cart: it.cart ?? ""
-      }));
-    }
-    if(Array.isArray(data.producers)){
-      state.producers = data.producers;
-    }
-
-    // Re-render sections that depend on the payload.
-    renderLog();
-    renderProducers();
-
-  }catch(err){
-    // If the API is temporarily unavailable, keep the demo UI alive.
-    state.lastStatusError = String(err);
-    // If we lose the API for more than a few seconds, drop back to DEMO so the operator can tell.    renderApiBadge();
+    render();
+  }catch(e){
+    state.lastStatusError = (e && e.message) ? e.message : String(e);
+    // Keep rendering (badge may show DEMO or STALE depending on lastStatusAt)
+    render();
   }
 }
+
 
 
 function stripeFor(st){
@@ -635,6 +605,8 @@ function simulateStatus(){
 }
 
 initData();
+fetchStatus();
+setInterval(fetchStatus, 1000);
 renderApiBadge();
 wireUI();
 applyRole();
