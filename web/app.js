@@ -23,6 +23,8 @@ const state = {
     { name: "Michael", role: "Producer", onAir: false, conn: "WARN", jitter: "45ms", loss: "3.8%", camera: false },
   ],
   now: { title: "", artist: "", dur: 180, pos: 0, ends: "" },
+  apiLive: false,
+  lastStatusError: null,
 };
 
 function pad(n){ return String(n).padStart(2,'0');}
@@ -124,6 +126,52 @@ function initData(){
   syncNowPlayingFromQueue(true);
   refillLog();
 }
+
+async function fetchStatus(){
+  try{
+    const r = await fetch("/api/v1/status", { cache: "no-store" });
+    if(!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+
+    // Mark API live: stop local simulation from diverging.
+    state.apiLive = true;
+    state.lastStatusError = null;
+
+    // Map API payload into the UI state shape.
+    if(data.now){
+      state.now.title = data.now.title || "";
+      state.now.artist = data.now.artist || "";
+      state.now.dur = data.now.dur || 0;
+      state.now.pos = data.now.pos || 0;
+    }
+    if(Array.isArray(data.log)){
+      state.log = data.log.map(it => ({
+        ...it,
+        // Ensure required fields exist for renderer:
+        tag: it.tag ?? "MUS",
+        time: it.time ?? "",
+        title: it.title ?? "",
+        artist: it.artist ?? "",
+        state: it.state ?? "queued",
+        dur: it.dur ?? "0:00",
+        cart: it.cart ?? ""
+      }));
+    }
+    if(Array.isArray(data.producers)){
+      state.producers = data.producers;
+    }
+
+    // Re-render sections that depend on the payload.
+    renderLog();
+    renderProducers();
+
+  }catch(err){
+    // If the API is temporarily unavailable, keep the demo UI alive.
+    state.lastStatusError = String(err);
+    // Do not flip apiLive back to false; this prevents jitter if the API blips.
+  }
+}
+
 
 function stripeFor(st){
   if(st==="playing") return "linear-gradient(180deg, rgba(79,156,255,.95), rgba(143,188,255,.85))";
@@ -393,14 +441,18 @@ function tickVu(){
 }
 
 function tickNowPlaying(){
+  // When connected to the engine API, we do not advance the clock locally.
+  // The engine is the source of truth for pos/dur.
+  if(!state.apiLive){
   if(state.log.length === 0){
     state.log.push(makeNextQueueItem());
     state.log[0].state = "playing";
     refillLog();
     syncNowPlayingFromQueue(false);
   }
-  state.now.pos += 1;
+    state.now.pos += 1;
   if(state.now.pos >= state.now.dur) advanceQueue("finished");
+  }
 
   const rem = state.now.dur - state.now.pos;
   qs("#npRemaining").textContent = fmtTime(rem);

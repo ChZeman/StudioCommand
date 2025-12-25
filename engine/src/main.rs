@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, path::PathBuf, sync::Arc};
+use std::{net::SocketAddr, sync::Arc};
 
 // StudioCommand engine (v0)
 //
@@ -21,17 +21,65 @@ use tower_http::services::{ServeDir, ServeFile};
 use tracing::{info, warn};
 
 #[derive(Clone)]
+#[derive(Clone)]
 struct AppState {
     version: String,
-    web_root: PathBuf,
     sys: Arc<tokio::sync::Mutex<System>>,
+    playout: Arc<tokio::sync::RwLock<PlayoutState>>,
+}
+
+#[derive(Clone, Serialize)]
+struct LogItem {
+    tag: String,
+    time: String,
+    title: String,
+    artist: String,
+    state: String, // "playing" | "next" | "queued"
+    dur: String,   // "3:45"
+    cart: String,
+}
+
+#[derive(Clone, Serialize)]
+struct NowPlaying {
+    title: String,
+    artist: String,
+    dur: u32, // seconds
+    pos: u32, // seconds
+}
+
+#[derive(Clone, Serialize)]
+struct ProducerStatus {
+    name: String,
+    role: String,
+    connected: bool,
+    onAir: bool,
+    camOn: bool,
+    jitter: String,
+    loss: String,
+    level: f32,
+}
+
+#[derive(Clone)]
+struct PlayoutState {
+    now: NowPlaying,
+    log: Vec<LogItem>,
+    producers: Vec<ProducerStatus>,
+}
+
+#[derive(Serialize)]
+struct StatusResponse {
+    version: String,
+    now: NowPlaying,
+    log: Vec<LogItem>,
+    producers: Vec<ProducerStatus>,
+    system: SystemInfo,
 }
 
 
 
 /// Root endpoint: UI is served by nginx; the engine focuses on API/WebSocket.
 async fn root() -> &'static str {
-    "StudioCommand engine is running. UI is served by nginx."
+    "StudioCommand engine is running. UI is served by nginx. Try /api/v1/status"
 }
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -41,16 +89,25 @@ async fn main() -> anyhow::Result<()> {
 
     let version = env!("CARGO_PKG_VERSION").to_string();
 
-    let web_root = std::env::var("STUDIOCOMMAND_WEB_ROOT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("../web"));
-
     let sys = System::new_all();
+
+// Demo playout state (v0): the UI now pulls this via /api/v1/status.
+// In later versions this becomes the real automation engine state.
+let playout = PlayoutState {
+    now: NowPlaying { title: "Neutron Dance".into(), artist: "Pointer Sisters".into(), dur: 242, pos: 0 },
+    log: demo_log(),
+    producers: demo_producers(),
+};
+
 let state = AppState {
-        version,
-        web_root: web_root.clone(),
-        sys: Arc::new(tokio::sync::Mutex::new(sys)),
-    };
+    version: version.clone(),
+    sys: Arc::new(tokio::sync::Mutex::new(sys)),
+    playout: Arc::new(tokio::sync::RwLock::new(playout)),
+};
+
+// Background tick: advances the demo queue once per second.
+tokio::spawn(playout_tick(state.playout.clone()));
+
 
     let app = build_router(state);
 
@@ -70,27 +127,100 @@ let state = AppState {
 }
 
 fn build_router(state: AppState) -> Router {
-    let index = state.web_root.join("index.html");
-    // ServeDir serves static UI assets. not_found_service() provides SPA fallback so deep links work.
-    let serve_dir = ServeDir::new(state.web_root.clone()).not_found_service(ServeFile::new(index));
-
     Router::new()
-        .route("/health", get(|| async { "OK" }))
-        .route("/api/v1/system/info", get(system_info))
-        .route("/admin/api/v1/updates/status", get(update_status))
-        // SPA entry points (same UI bundle in v0)
         .route("/", get(root))
-        .route("/admin", get(spa_entry))
-        .route("/remote", get(spa_entry))
-        .fallback_service(serve_dir)
+        .route("/health", get(|| async { "OK" }))
+        .route("/api/v1/status", get(status))
+        .route("/api/v1/system/info", get(system_info))
+        .route("/admin/api/v1/update/status", get(update_status))
         .with_state(state)
 }
 
-async fn spa_entry() -> impl IntoResponse {
-    // If web root is present, the fallback ServeDir will serve the real index.html.
-    (StatusCode::OK, [(header::CONTENT_TYPE, "text/html")], Html(include_str!("../stub_index.html")))
+
+
+fn demo_log() -> Vec<LogItem> {
+    vec![
+        LogItem{ tag:"MUS".into(), time:"Now".into(), title:"Neutron Dance".into(), artist:"Pointer Sisters".into(), state:"playing".into(), dur:"4:02".into(), cart:"080-0861".into() },
+        LogItem{ tag:"MUS".into(), time:"+0:00".into(), title:"Super Freak (Part 1)".into(), artist:"Rick James".into(), state:"next".into(), dur:"3:14".into(), cart:"080-1588".into() },
+        LogItem{ tag:"MUS".into(), time:"+3:14".into(), title:"Bette Davis Eyes".into(), artist:"Kim Carnes".into(), state:"queued".into(), dur:"3:30".into(), cart:"080-6250".into() },
+        LogItem{ tag:"MUS".into(), time:"+6:44".into(), title:"Jessie's Girl".into(), artist:"Rick Springfield".into(), state:"queued".into(), dur:"3:07".into(), cart:"080-1591".into() },
+    ]
 }
 
+fn demo_producers() -> Vec<ProducerStatus> {
+    vec![
+        ProducerStatus{ name:"Sarah".into(), role:"Producer".into(), connected:true, onAir:true, camOn:false, jitter:"8–20ms".into(), loss:"0.1–0.9%".into(), level:0.72 },
+        ProducerStatus{ name:"Emily".into(), role:"Producer".into(), connected:true, onAir:false, camOn:false, jitter:"8–20ms".into(), loss:"0.1–0.9%".into(), level:0.44 },
+        ProducerStatus{ name:"Michael".into(), role:"Producer".into(), connected:true, onAir:false, camOn:false, jitter:"8–20ms".into(), loss:"0.1–0.9%".into(), level:0.51 },
+    ]
+}
+
+async fn playout_tick(playout: Arc<tokio::sync::RwLock<PlayoutState>>) {
+    use tokio::time::{sleep, Duration};
+
+    loop {
+        sleep(Duration::from_secs(1)).await;
+
+        let mut p = playout.write().await;
+        p.now.pos = p.now.pos.saturating_add(1);
+
+        // When the current item finishes, drop it from the log and promote the next item.
+        if p.now.pos >= p.now.dur {
+            p.now.pos = 0;
+
+            if !p.log.is_empty() {
+                // Remove the playing item (top of log).
+                p.log.remove(0);
+            }
+
+            // Promote new playing item from top of log.
+            if let Some(first) = p.log.get_mut(0) {
+                first.state = "playing".into();
+                p.now.title = first.title.clone();
+                p.now.artist = first.artist.clone();
+                // crude parse of M:SS
+                if let Some((m,s)) = first.dur.split_once(":") {
+                    if let (Ok(m), Ok(s)) = (m.parse::<u32>(), s.parse::<u32>()) {
+                        p.now.dur = m*60 + s;
+                    }
+                }
+            }
+
+            // Ensure there's a "next" item
+            if let Some(second) = p.log.get_mut(1) {
+                second.state = "next".into();
+            }
+
+            // Keep a few queued items; in real engine this comes from scheduler.
+            while p.log.len() < 8 {
+                let n = p.log.len();
+                p.log.push(LogItem{
+                    tag:"MUS".into(),
+                    time:format!("+{}", n),
+                    title:format!("Queued Track {}", n),
+                    artist:"Various".into(),
+                    state:"queued".into(),
+                    dur:"3:30".into(),
+                    cart:format!("080-{:04}", 9000+n as i32),
+                });
+            }
+        }
+    }
+}
+
+async fn status(State(state): State<AppState>) -> Json<StatusResponse> {
+    // Refresh system snapshot
+    let system = (system_info(State(state.clone())).await).0;
+
+    let p = state.playout.read().await;
+    Json(StatusResponse {
+        version: state.version.clone(),
+        now: p.now.clone(),
+        log: p.log.clone(),
+        producers: p.producers.clone(),
+        system,
+    })
+}
 #[derive(Serialize)]
 struct SystemInfo {
     name: String,
