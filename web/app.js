@@ -8,6 +8,8 @@ const qsa = (s) => Array.from(document.querySelectorAll(s));
 
 const TARGET_LOG_LEN = 12;
 
+const UI_VERSION = "0.1.14";
+
 const state = {
   role: "operator",
   log: [],
@@ -161,23 +163,47 @@ function renderApiBadge(){
 
 
 
+
 async function fetchStatus(){
   try{
     const r = await fetch("/api/v1/status", { cache: "no-store" });
+    const ct = (r.headers.get("content-type") || "").toLowerCase();
+
     if(!r.ok) throw new Error(`HTTP ${r.status}`);
+
+    // Treat only JSON as LIVE.
+    if(!ct.includes("application/json")){
+      const t = await r.text();
+      const preview = t.slice(0,80).replace(/\s+/g," ");
+      throw new Error(`Non-JSON response (${ct || "unknown"}): ${preview}...`);
+    }
+
     const data = await r.json();
 
     state.status = data;
     state.lastStatusAt = Date.now();
     state.lastStatusError = null;
 
+    setApiBadge("LIVE");
     render();
   }catch(e){
     state.lastStatusError = (e && e.message) ? e.message : String(e);
-    // Keep rendering (badge may show DEMO or STALE depending on lastStatusAt)
+
+    const lastOk = state.lastStatusAt || 0;
+    const ageMs = lastOk ? (Date.now() - lastOk) : Infinity;
+
+    if(lastOk > 0 && ageMs > 5000){
+      setApiBadge("STALE", `LIVE (last update ${Math.round(ageMs/1000)}s ago). Error: ${state.lastStatusError}`);
+    }else if(lastOk > 0){
+      setApiBadge("LIVE", `LIVE (temporary error: ${state.lastStatusError})`);
+    }else{
+      setApiBadge("DEMO", `DEMO (API error: ${state.lastStatusError})`);
+    }
+
     render();
   }
 }
+
 
 
 
@@ -605,6 +631,8 @@ function simulateStatus(){
 }
 
 initData();
+setHeaderVersion();
+setApiBadge("DEMO");
 fetchStatus();
 setInterval(fetchStatus, 1000);
 renderApiBadge();
@@ -621,3 +649,28 @@ setInterval(setClock, 1000);
 setInterval(tickNowPlaying, 1000);
 setInterval(tickVu, 120);
 setInterval(simulateStatus, 5000);
+
+function setApiBadge(mode, detail){
+  const el = qs("#apiBadge");
+  if(!el) return;
+  el.classList.remove("badge-live","badge-demo","badge-stale");
+  if(mode === "LIVE"){
+    el.textContent = "LIVE";
+    el.classList.add("badge-live");
+    el.title = detail || "LIVE (driven by /api/v1/status)";
+  }else if(mode === "STALE"){
+    el.textContent = "LIVE (STALE)";
+    el.classList.add("badge-stale");
+    el.title = detail || "LIVE but updates are stale";
+  }else{
+    el.textContent = "DEMO";
+    el.classList.add("badge-demo");
+    el.title = detail || "DEMO (using local UI data)";
+  }
+}
+
+function setHeaderVersion(){
+  const h = qs("#hdrTitle");
+  if(h) h.title = `StudioCommand UI v${UI_VERSION}`;
+}
+
