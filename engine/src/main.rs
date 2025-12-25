@@ -128,6 +128,9 @@ fn build_router(state: AppState) -> Router {
         .route("/api/v1/transport/skip", post(api_transport_skip))
         .route("/api/v1/transport/dump", post(api_transport_dump))
         .route("/api/v1/transport/reload", post(api_transport_reload))
+        .route("/api/v1/queue/remove", post(api_queue_remove))
+        .route("/api/v1/queue/move", post(api_queue_move))
+        .route("/api/v1/queue/insert", post(api_queue_insert))
         .route("/", get(root))
         .route("/health", get(|| async { "OK" }))
         .route("/api/v1/status", get(status))
@@ -371,6 +374,98 @@ async fn api_transport_reload(State(state): State<AppState>) -> Json<serde_json:
     let mut p = state.playout.write().await;
     reset_demo_playout(&mut p);
     Json(json!({"ok": true}))
+}
+
+
+
+#[derive(serde::Deserialize)]
+struct QueueRemoveReq { index: usize }
+
+#[derive(serde::Deserialize)]
+struct QueueMoveReq { from: usize, to: usize }
+
+#[derive(serde::Deserialize)]
+struct QueueInsertReq { after: usize, item: QueueInsertItem }
+
+#[derive(serde::Deserialize)]
+struct QueueInsertItem {
+    tag: String,
+    title: String,
+    artist: String,
+    dur: String,
+    cart: String,
+}
+
+async fn api_queue_remove(
+    State(state): State<AppState>,
+    Json(req): Json<QueueRemoveReq>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    // Remove an upcoming item from the queue. Index 0 is "playing" and cannot be removed.
+    let mut p = state.playout.write().await;
+    if req.index == 0 || req.index >= p.log.len() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    p.log.remove(req.index);
+    normalize_log_state(&mut p);
+    Ok(Json(json!({"ok": true})))
+}
+
+async fn api_queue_move(
+    State(state): State<AppState>,
+    Json(req): Json<QueueMoveReq>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    // Move an upcoming item within the queue. Index 0 is "playing" and stays put.
+    let mut p = state.playout.write().await;
+    if req.from == 0 || req.to == 0 || req.from >= p.log.len() || req.to >= p.log.len() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    if req.from == req.to {
+        return Ok(Json(json!({"ok": true})));
+    }
+    let item = p.log.remove(req.from);
+    p.log.insert(req.to, item);
+    normalize_log_state(&mut p);
+    Ok(Json(json!({"ok": true})))
+}
+
+async fn api_queue_insert(
+    State(state): State<AppState>,
+    Json(req): Json<QueueInsertReq>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    // Insert a cart after a given index (e.g., after "next" => after=1).
+    let mut p = state.playout.write().await;
+    let after = req.after.min(p.log.len().saturating_sub(1));
+    let ins = LogItem{
+        tag: req.item.tag,
+        time: "--:--".into(),
+        title: req.item.title,
+        artist: req.item.artist,
+        state: "queued".into(),
+        dur: req.item.dur,
+        cart: req.item.cart,
+    };
+    p.log.insert(after+1, ins);
+    normalize_log_state(&mut p);
+    Ok(Json(json!({"ok": true})))
+}
+
+fn normalize_log_state(p: &mut PlayoutState){
+    // Ensure we always have exactly one playing + one next marker,
+    // and keep Now Playing in sync with the first item in the log.
+    if let Some(first) = p.log.get_mut(0) {
+        first.state = "playing".into();
+        p.now.title = first.title.clone();
+        p.now.artist = first.artist.clone();
+        p.now.dur = parse_dur_to_sec(&first.dur);
+        // keep current position, but clamp to duration
+        if p.now.pos > p.now.dur { p.now.pos = 0; }
+    }
+    if p.log.len() > 1 {
+        p.log[1].state = "next".into();
+    }
+    for i in 2..p.log.len() {
+        p.log[i].state = "queued".into();
+    }
 }
 
 fn reset_demo_playout(p: &mut PlayoutState) {

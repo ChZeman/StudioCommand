@@ -165,10 +165,12 @@ function renderApiBadge(){
 
 
 
-async function postAction(path){
+async function postAction(path, body){
   // Small helper for operator controls. We keep it simple for now (no auth yet).
-  const r = await fetch(path, { method: "POST", headers: { "content-type": "application/json" } });
-  if(!r.ok){
+  const opts = { method: "POST", headers: { "content-type": "application/json" } };
+  if(body !== undefined) opts.body = JSON.stringify(body);
+  const r = await fetch(path, opts);
+if(!r.ok){
     const t = await r.text().catch(()=> "");
     throw new Error(`HTTP ${r.status} ${t}`);
   }
@@ -280,7 +282,60 @@ function renderLog(){
 
     const meta = document.createElement("div");
     meta.className = "meta";
-    meta.innerHTML = `<span>Dur: ${it.dur}</span><span>Action: ⋯</span>`;
+    meta.innerHTML = `<span>Dur: ${it.dur}</span>`;
+const actions = document.createElement("span");
+actions.className = "log-actions";
+
+const mkBtn = (label, title, onClick) => {
+  const b = document.createElement("button");
+  b.className = "mini";
+  b.type = "button";
+  b.textContent = label;
+  b.title = title;
+  b.addEventListener("click", (e) => { e.stopPropagation(); onClick(); });
+  return b;
+};
+
+// Queue editing (v1): buttons instead of drag/drop.
+// Guard rails: never mutate the currently playing row (idx=0).
+const canEdit = idx > 0;
+const canUp = canEdit && idx > 1;          // don't move above "playing"
+const canDown = canEdit && idx < state.log.length - 1;
+
+const up = mkBtn("▲", "Move up", async () => {
+  if(!canUp) return;
+  try{
+    if(state.apiMode === "LIVE") await postAction("/api/v1/queue/move", { from: idx, to: idx-1 });
+    else { const it2 = state.log.splice(idx,1)[0]; state.log.splice(idx-1,0,it2); }
+    toast("Moved up");
+  }catch(err){ alert(err.message || String(err)); }
+});
+const down = mkBtn("▼", "Move down", async () => {
+  if(!canDown) return;
+  try{
+    if(state.apiMode === "LIVE") await postAction("/api/v1/queue/move", { from: idx, to: idx+1 });
+    else { const it2 = state.log.splice(idx,1)[0]; state.log.splice(idx+1,0,it2); }
+    toast("Moved down");
+  }catch(err){ alert(err.message || String(err)); }
+});
+const del = mkBtn("✕", "Remove from queue", async () => {
+  if(!canEdit) return;
+  try{
+    if(state.apiMode === "LIVE") await postAction("/api/v1/queue/remove", { index: idx });
+    else { state.log.splice(idx,1); }
+    toast("Removed");
+  }catch(err){ alert(err.message || String(err)); }
+});
+
+if(!canUp) up.disabled = true;
+if(!canDown) down.disabled = true;
+if(!canEdit) del.disabled = true;
+
+actions.appendChild(up);
+actions.appendChild(down);
+actions.appendChild(del);
+meta.appendChild(actions);
+
 
     main.appendChild(top);
     if(it.artist) main.appendChild(artist);
@@ -542,24 +597,28 @@ function wireUI(){
   qs("#closeLibrary").onclick = closeDrawers;
   qs("#libClear").onclick = () => { qs("#libSearch").value=""; qs("#libSearch").focus(); };
 
-  qs("#libAdd").onclick = () => {
+  qs("#libAdd").onclick = async () => {
     const it = state.library[state.selectedLibraryIndex];
     if(!it) return;
-    const insertAt = Math.min(state.log.length, Math.max(1, state.selectedLogIndex + 1));
-    state.log.splice(insertAt, 0, { time:"--:--", tag:"MUS", title:it.title, artist:it.artist, dur:it.dur, state:"queued" });
-    toast(`Queued: ${it.title}`);
-    refillLog();
-    renderLog();
+    const after = Math.min(state.log.length-1, Math.max(0, state.selectedLogIndex));
+    try{
+      if(state.apiMode === "LIVE"){
+        await postAction("/api/v1/queue/insert", { after, item: { tag:"MUS", title:it.title, artist:it.artist, dur:it.dur, cart: it.code || "" } });
+      }else{
+        const insertAt = Math.min(state.log.length, Math.max(1, after+1));
+        state.log.splice(insertAt, 0, { time:"--:--", tag:"MUS", title:it.title, artist:it.artist, dur:it.dur, state:"queued" });
+        refillLog();
+        renderLog();
+      }
+      toast(`Queued: ${it.title}`);
+    }catch(err){ alert(err.message || String(err)); }
   };
   qs("#libPreview").onclick = () => toast("Preview (demo)");
 
   qs("#btnMonitors").onclick = () => openDrawer("monitors");
   qs("#closeMonitors").onclick = closeDrawers;
 
-  qs("#btnSkip").onclick = skipNext;
-  qs("#btnDump").onclick = dumpNow;
-  qs("#btnReload").onclick = reloadLog;
-  qs("#btnTalk").onclick = () => toast("Talk (push-to-talk in real app)");
+        qs("#btnTalk").onclick = () => toast("Talk (push-to-talk in real app)");
 
   const tba = qs("#btnTalkbackAll");
   if(tba) tba.onclick = () => toast("Talkback All (demo)");
@@ -713,4 +772,3 @@ function setHeaderVersion(){
   const h = qs("#hdrTitle");
   if(h) h.title = `StudioCommand UI v${UI_VERSION}`;
 }
-
