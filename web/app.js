@@ -133,29 +133,32 @@ function renderApiBadge(){
   const el = qs("#apiBadge");
   if(!el) return;
 
-  // If we've never had a successful API response, we are in DEMO mode.
-  if(!state.apiLive){
-    el.textContent = "DEMO";
-    el.classList.remove("badge-live","badge-stale");
-    el.classList.add("badge-demo");
-    el.title = state.lastStatusError ? `DEMO (API error: ${state.lastStatusError})` : "DEMO (using local UI data)";
+  const lastOk = state.lastStatusAt || 0;
+  const ageMs = lastOk ? (Date.now() - lastOk) : Infinity;
+
+  // LIVE if we've ever had a successful API fetch.
+  if(lastOk > 0){
+    if(ageMs > 5000){
+      el.textContent = "LIVE (STALE)";
+      el.classList.remove("badge-live","badge-demo");
+      el.classList.add("badge-stale");
+      el.title = `LIVE (last update ${Math.round(ageMs/1000)}s ago)`;
+    }else{
+      el.textContent = "LIVE";
+      el.classList.remove("badge-demo","badge-stale");
+      el.classList.add("badge-live");
+      el.title = "LIVE (driven by /api/v1/status)";
+    }
     return;
   }
 
-  // We are LIVE. If data hasn't updated recently, mark as stale.
-  const age = Date.now() - (state.lastStatusAt || 0);
-  if(age > 5000){
-    el.textContent = "LIVE (STALE)";
-    el.classList.remove("badge-live","badge-demo");
-    el.classList.add("badge-stale");
-    el.title = `LIVE (last update ${Math.round(age/1000)}s ago)`;
-  }else{
-    el.textContent = "LIVE";
-    el.classList.remove("badge-demo","badge-stale");
-    el.classList.add("badge-live");
-    el.title = "LIVE (driven by /api/v1/status)";
-  }
+  // Otherwise: DEMO (never successfully reached API)
+  el.textContent = "DEMO";
+  el.classList.remove("badge-live","badge-stale");
+  el.classList.add("badge-demo");
+  el.title = state.lastStatusError ? `DEMO (API error: ${state.lastStatusError})` : "DEMO (using local UI data)";
 }
+
 
 async function fetchStatus(){
   try{
@@ -203,11 +206,7 @@ async function fetchStatus(){
   }catch(err){
     // If the API is temporarily unavailable, keep the demo UI alive.
     state.lastStatusError = String(err);
-    // If we lose the API for more than a few seconds, drop back to DEMO so the operator can tell.
-    if(state.lastStatusAt === 0 || (Date.now() - state.lastStatusAt) > 5000){
-      state.apiLive = false;
-    }
-    renderApiBadge();
+    // If we lose the API for more than a few seconds, drop back to DEMO so the operator can tell.    renderApiBadge();
   }
 }
 
