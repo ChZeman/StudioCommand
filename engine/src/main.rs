@@ -339,7 +339,7 @@ async fn shutdown_signal() {
 
 async fn api_transport_skip(State(state): State<AppState>) -> Json<serde_json::Value> {
     // "Skip" advances immediately to the next item in the playout log.
-    let mut p = state.playout.lock().await;
+    let mut p = state.playout.write().await;
     advance_to_next(&mut p, Some("skipped"));
     Json(json!({"ok": true}))
 }
@@ -347,14 +347,14 @@ async fn api_transport_skip(State(state): State<AppState>) -> Json<serde_json::V
 async fn api_transport_dump(State(state): State<AppState>) -> Json<serde_json::Value> {
     // "Dump" is an operator action to instantly remove the current playing item.
     // In this stub engine, we treat it as "skip with reason=dumped".
-    let mut p = state.playout.lock().await;
+    let mut p = state.playout.write().await;
     advance_to_next(&mut p, Some("dumped"));
     Json(json!({"ok": true}))
 }
 
 async fn api_transport_reload(State(state): State<AppState>) -> Json<serde_json::Value> {
     // "Reload" repopulates the in-memory demo log.
-    let mut p = state.playout.lock().await;
+    let mut p = state.playout.write().await;
     reset_demo_playout(&mut p);
     Json(json!({"ok": true}))
 }
