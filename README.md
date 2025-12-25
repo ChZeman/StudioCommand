@@ -29,7 +29,7 @@ curl -fsSL https://raw.githubusercontent.com/ChZeman/StudioCommand/main/packagin
 - If `--version` is omitted, the installer will propose the **latest** GitHub Release and ask you to confirm.
 - If `--domain` is omitted, the installer will prompt for it.
 - If `--email` is omitted, the installer uses a **self-signed** certificate (browser warning) for quick testing.
-- StudioCommand is served via **nginx HTTPS on port 8443**.
+- StudioCommand is served via **nginx HTTPS on port 9443**.
 
 
 ## Releases + checksums

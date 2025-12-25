@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# StudioCommand installer (v0) + Nginx reverse proxy on :8443
+# StudioCommand installer (v0) + Nginx reverse proxy on :9443
 #
 # Installs to:
 #   /opt/studiocommand/{releases/<version>,shared,current}
 # Configures:
 #   - systemd service: studiocommand (engine on 127.0.0.1:3000)
-#   - nginx site on HTTPS :8443
+#   - nginx site on HTTPS :9443
 #   - Let's Encrypt if --email provided; otherwise self-signed cert
 #
 # Usage:
@@ -135,6 +135,6 @@ systemctl reload nginx
 echo
 echo "[✓] Installed."
 echo "    Engine (internal):  http://127.0.0.1:3000"
-echo "    Nginx (public):     https://${DOMAIN}:8443"
+echo "    Nginx (public):     https://${DOMAIN}:9443"
 echo
-echo "Firewall reminder: allow 8443/tcp (and 80/tcp if using redirect/ACME). Keep 3000 closed externally."
+echo "Firewall reminder: allow 9443/tcp (and 80/tcp if using redirect/ACME). Keep 3000 closed externally."
