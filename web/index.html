@@ -42,7 +42,10 @@
       <section class="panel log">
         <div class="panel-title">
           <div>Playout Queue</div>
-          <div class="panel-meta">Played items disappear</div>
+          <div class="panel-meta-actions">
+            <div class="panel-meta">Played items disappear</div>
+            <button class="btn btn-ghost btn-mini" id="btnUndoReorder" title="Undo last reorder (Ctrl/Cmd+Z)" disabled>Undo</button>
+          </div>
         </div>
         <div class="log-list" id="logList"></div>
         <div class="panel-footer">

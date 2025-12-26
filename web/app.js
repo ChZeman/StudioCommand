@@ -10,7 +10,7 @@ const TARGET_LOG_LEN = 12;
 
 // NOTE: UI_VERSION is purely informational (tooltip on the header).
 // The authoritative running version is exposed by the backend at /api/v1/status.
-const UI_VERSION = "0.1.25";
+const UI_VERSION = "0.1.31";
 
 const state = {
   role: "operator",
@@ -53,6 +53,15 @@ const state = {
   flashArmed: false,
   flashPrevOrder: [], // array of UUID strings (full log order before reorder)
   flashIds: new Set(), // UUID strings to flash on next render
+
+  // Undo support (v0.1.31)
+  // We keep a single-level undo for reorder operations. Rationale:
+  // - Simpler mental model for operators: "Undo" is always "the last reorder".
+  // - Avoids building a full history stack before we have real playout + logs.
+  // - Works equally well for drag/drop and ▲/▼ button moves.
+  undoPendingUpcoming: null, // array of UUID strings captured before a reorder request
+  undoUpcoming: null,        // array of UUID strings available for Ctrl/Cmd+Z
+  undoAvailable: false,
 };
 
 function pad(n){ return String(n).padStart(2,'0');}
@@ -366,6 +375,62 @@ function armFlashForReorder(){
   state.flashArmed = true;
 }
 
+function renderUndoButton(){
+  const b = qs("#btnUndoReorder");
+  if(!b) return;
+  b.disabled = !state.undoAvailable;
+  b.style.opacity = state.undoAvailable ? "1" : ".55";
+}
+
+function armUndoForReorder(){
+  // Called immediately before we request a reorder. We snapshot the current
+  // upcoming order so a later Undo can restore it.
+  state.undoPendingUpcoming = upcomingIdsFromState();
+}
+
+function commitUndoForReorder(){
+  // Called after a reorder request successfully reaches the backend.
+  if(!state.undoPendingUpcoming) return;
+  state.undoUpcoming = state.undoPendingUpcoming;
+  state.undoPendingUpcoming = null;
+  state.undoAvailable = true;
+  renderUndoButton();
+}
+
+function clearUndo(){
+  state.undoPendingUpcoming = null;
+  state.undoUpcoming = null;
+  state.undoAvailable = false;
+  renderUndoButton();
+}
+
+async function undoLastReorder(){
+  if(!state.undoAvailable || !state.undoUpcoming) return;
+  try{
+    if(state.apiMode === "LIVE"){
+      armFlashForReorder();
+      await postUpcomingReorder(state.undoUpcoming);
+      clearUndo();
+      await fetchStatus();
+    }else{
+      const playing = state.log[0];
+      const byId = new Map(state.log.slice(1).map(it => [it.id, it]));
+      const newUpcoming = [];
+      for(const id of state.undoUpcoming){
+        const it = byId.get(id);
+        if(it){ newUpcoming.push(it); byId.delete(id); }
+      }
+      for(const it of byId.values()) newUpcoming.push(it);
+      state.log = [playing, ...newUpcoming];
+      clearUndo();
+      renderLog();
+    }
+    toast("Undo reorder");
+  }catch(err){
+    alert(err.message || String(err));
+  }
+}
+
 
 function moveWithinUpcoming(upcoming, fromUpcomingIdx, toUpcomingIdx){
   const arr = upcoming.slice();
@@ -379,6 +444,7 @@ function moveWithinUpcoming(upcoming, fromUpcomingIdx, toUpcomingIdx){
 // This also makes it easier to pause queue re-renders during drag gestures.
 function renderAll(){
   renderApiBadge();
+  renderUndoButton();
   renderLog();
   renderProducers();
   renderLibrary();
@@ -443,8 +509,10 @@ function renderLog(){
           if(state.apiMode === "LIVE"){
             const upcoming = upcomingIdsFromState();
             const newUpcoming = moveWithinUpcoming(upcoming, fromUpcoming, toUpcoming);
+            armUndoForReorder();
             armFlashForReorder();
             await postUpcomingReorder(newUpcoming);
+            commitUndoForReorder();
             await fetchStatus();
           }else{
             const it2 = state.log.splice(fromIdx, 1)[0];
@@ -519,8 +587,10 @@ const up = mkBtn("▲", "Move up", async () => {
       const upcoming = upcomingIdsFromState();
       // upcoming[0] corresponds to log[1]
       const newUpcoming = moveWithinUpcoming(upcoming, idx-1, idx-2);
+      armUndoForReorder();
       armFlashForReorder();
       await postUpcomingReorder(newUpcoming);
+      commitUndoForReorder();
       await fetchStatus();
     }else{
       const it2 = state.log.splice(idx,1)[0];
@@ -535,8 +605,10 @@ const down = mkBtn("▼", "Move down", async () => {
     if(state.apiMode === "LIVE"){
       const upcoming = upcomingIdsFromState();
       const newUpcoming = moveWithinUpcoming(upcoming, idx-1, idx);
+      armUndoForReorder();
       armFlashForReorder();
       await postUpcomingReorder(newUpcoming);
+      commitUndoForReorder();
       await fetchStatus();
     }else{
       const it2 = state.log.splice(idx,1)[0];
@@ -852,6 +924,9 @@ function wireUI(){
   qs("#btnMonitors").onclick = () => openDrawer("monitors");
   qs("#closeMonitors").onclick = closeDrawers;
 
+  const undoBtn = qs("#btnUndoReorder");
+  if(undoBtn) undoBtn.onclick = () => undoLastReorder();
+
         qs("#btnTalk").onclick = () => toast("Talk (push-to-talk in real app)");
 
   const tba = qs("#btnTalkbackAll");
@@ -883,6 +958,17 @@ function wireUI(){
 
   document.addEventListener("keydown", (e) => {
     const key = e.key.toLowerCase();
+
+    // Undo last reorder (v0.1.31)
+    // We bind Ctrl+Z / Cmd+Z for fast operator recovery after a drag mis-drop.
+    // We only consume the shortcut when undo is available.
+    if((e.ctrlKey || e.metaKey) && key === "z"){
+      if(state.undoAvailable){
+        e.preventDefault();
+        undoLastReorder();
+      }
+      return;
+    }
     if(key === "escape") closeDrawers();
     if(key === "l" && !e.ctrlKey) openDrawer("library");
     if(key === "m") openDrawer("monitors");
@@ -890,6 +976,7 @@ function wireUI(){
     if(key === "d" && state.role==="operator") dumpNow();
     if(key === "r" && state.role==="operator") reloadLog();
     if(e.ctrlKey && key === "f"){ e.preventDefault(); openDrawer("library"); }
+
   });
 }
 

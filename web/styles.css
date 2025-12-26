@@ -103,6 +103,7 @@ body{
   border-bottom:1px solid rgba(36,48,64,.7);
   font-weight:800;
 }
+.panel-meta-actions{display:flex; align-items:center; gap:10px}
 .panel-meta{font-size:12px; color:var(--muted2); font-weight:600}
 .panel-footer{padding:10px 12px; border-top:1px solid rgba(36,48,64,.7); color:var(--muted2); font-size:12px}
 
@@ -288,6 +289,11 @@ body{
 .btn-danger{background: rgba(255,92,92,.18); border-color: rgba(255,92,92,.35)}
 .btn-ghost{background: transparent}
 .btn-ghost:hover{background: rgba(20,26,32,.55)}
+
+/* Mini button variant used for secondary actions inside headers.
+   Rationale: queue editing should stay "broadcast calm"; undo is important but
+   shouldn't visually compete with primary actions like Library/Monitors. */
+.btn-mini{padding:6px 10px; border-radius:10px; font-size:12px; font-weight:800}
 
 kbd{
   font-family:var(--mono);

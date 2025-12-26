@@ -61,6 +61,18 @@ Why we implement it this way:
 - The animation is **CSS-driven** (JS only toggles a class), which keeps the
   code small and avoids timers.
 
+## Undo last reorder (Ctrl/Cmd+Z)
+
+Reordering a live show queue is high-stakes; a single mis-drop can be hard to
+spot when titles repeat. The UI therefore provides a single-level **Undo**:
+
+- The Undo snapshot is taken immediately before a reorder request.
+- After the reorder succeeds, the snapshot becomes available via the **Undo**
+  button or the `Ctrl+Z` / `Cmd+Z` shortcut.
+- Undo is intentionally **single-level** for now: it always means "undo the last
+  reorder". This keeps operator mental load low until we have real playout logs
+  and a richer history model.
+
 
 
 ## Persistence
