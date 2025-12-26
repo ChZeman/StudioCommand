@@ -105,12 +105,14 @@ fn db_load_queue(conn: &Connection) -> anyhow::Result<Option<Vec<LogItem>>> {
     }
 
     // Normalize state markers so the UI is consistent even if the DB contains older data.
-    normalize_log_state(&mut out);
+    // Note: we only normalize the *log* markers here; NowPlaying is derived from the
+    // in-memory PlayoutState and is handled separately.
+    normalize_log_markers(&mut out);
 
     Ok(Some(out))
 }
 
-fn db_save_queue(conn: &Connection, log: &[LogItem]) -> anyhow::Result<()> {
+fn db_save_queue(conn: &mut Connection, log: &[LogItem]) -> anyhow::Result<()> {
     db_init(conn)?;
 
     let tx = conn.transaction()?;
@@ -168,8 +170,8 @@ async fn load_queue_from_db_or_demo() -> Vec<LogItem> {
 async fn persist_queue(log: Vec<LogItem>) {
     let path = db_path();
     let _ = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-        let conn = Connection::open(path)?;
-        db_save_queue(&conn, &log)?;
+        let mut conn = Connection::open(path)?;
+        db_save_queue(&mut conn, &log)?;
         Ok(())
     })
     .await
@@ -677,22 +679,36 @@ async fn api_queue_insert(
     Ok(Json(json!({"ok": true})))
 }
 
-fn normalize_log_state(p: &mut PlayoutState){
-    // Ensure we always have exactly one playing + one next marker,
-    // and keep Now Playing in sync with the first item in the log.
-    if let Some(first) = p.log.get_mut(0) {
+fn normalize_log_markers(log: &mut [LogItem]) {
+    // Keep queue marker semantics deterministic:
+    //   - index 0 is always "playing"
+    //   - index 1 (if present) is always "next"
+    //   - everything after that is "queued"
+    //
+    // We centralize this logic so it can be applied both to the in-memory queue
+    // and to DB-loaded queues (which may contain legacy/incorrect markers).
+    if let Some(first) = log.get_mut(0) {
         first.state = "playing".into();
+    }
+    if log.len() > 1 {
+        log[1].state = "next".into();
+    }
+    for i in 2..log.len() {
+        log[i].state = "queued".into();
+    }
+}
+
+fn normalize_log_state(p: &mut PlayoutState){
+    // Ensure we always have deterministic "playing/next/queued" markers,
+    // and keep Now Playing in sync with the first item in the log.
+    normalize_log_markers(&mut p.log);
+
+    if let Some(first) = p.log.get(0) {
         p.now.title = first.title.clone();
         p.now.artist = first.artist.clone();
         p.now.dur = parse_dur_to_sec(&first.dur);
         // keep current position, but clamp to duration
         if p.now.pos > p.now.dur { p.now.pos = 0; }
-    }
-    if p.log.len() > 1 {
-        p.log[1].state = "next".into();
-    }
-    for i in 2..p.log.len() {
-        p.log[i].state = "queued".into();
     }
 }
 
