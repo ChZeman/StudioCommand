@@ -61,3 +61,7 @@ Why we implement it this way:
 - The animation is **CSS-driven** (JS only toggles a class), which keeps the
   code small and avoids timers.
 
+
+
+## Persistence
+The engine persists queue state (including UUIDs used for reordering) to SQLite. The UI simply reflects `/api/v1/status`.

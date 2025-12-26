@@ -17,6 +17,7 @@ use axum::{
 };
 use serde::{Serialize, Deserialize};
 use uuid::Uuid;
+use rusqlite::{Connection, params};
 use sysinfo::System;
 use tracing::{info, warn};
 
@@ -25,6 +26,156 @@ struct AppState {
     version: String,
     sys: Arc<tokio::sync::Mutex<System>>,
     playout: Arc<tokio::sync::RwLock<PlayoutState>>,
+}
+
+// --- Persistence (SQLite) -------------------------------------------------
+//
+// Why SQLite?
+// - Crash-safe: updates happen inside transactions.
+// - Concurrent-safe: UI reorder, future ingest, and engine ops can all share one DB.
+// - Operationally simple: a single file, but with the safety properties of a database.
+//
+// We keep the DB schema intentionally small and stable. The HTTP API remains the main
+// integration surface; future third-party file ingest can translate inputs into API/commands.
+//
+// DB location:
+// - Can be overridden with STUDIOCOMMAND_DB_PATH
+// - Defaults to /opt/studiocommand/shared/studiocommand.db (installer-managed persistent dir)
+//
+// Note: rusqlite is synchronous. We call it via spawn_blocking to avoid blocking tokio.
+fn db_path() -> String {
+    std::env::var("STUDIOCOMMAND_DB_PATH")
+        .unwrap_or_else(|_| "/opt/studiocommand/shared/studiocommand.db".to_string())
+}
+
+fn db_init(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        r#"
+        PRAGMA journal_mode = WAL;
+        PRAGMA synchronous = NORMAL;
+        PRAGMA foreign_keys = ON;
+
+        CREATE TABLE IF NOT EXISTS queue_items (
+            id       TEXT PRIMARY KEY,
+            position INTEGER NOT NULL,
+            tag      TEXT NOT NULL,
+            time     TEXT NOT NULL,
+            title    TEXT NOT NULL,
+            artist   TEXT NOT NULL,
+            state    TEXT NOT NULL,
+            dur      TEXT NOT NULL,
+            cart     TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_queue_items_position ON queue_items(position);
+        "#,
+    )?;
+    Ok(())
+}
+
+fn db_load_queue(conn: &Connection) -> anyhow::Result<Option<Vec<LogItem>>> {
+    db_init(conn)?;
+
+    let count: i64 = conn.query_row("SELECT COUNT(*) FROM queue_items", [], |row| row.get(0))?;
+    if count == 0 {
+        return Ok(None);
+    }
+
+    let mut stmt = conn.prepare(
+        "SELECT id, tag, time, title, artist, state, dur, cart FROM queue_items ORDER BY position ASC",
+    )?;
+    let mut rows = stmt.query([])?;
+
+    let mut out: Vec<LogItem> = Vec::new();
+    while let Some(row) = rows.next()? {
+        let id_str: String = row.get(0)?;
+        let id = Uuid::parse_str(&id_str)
+            .map_err(|e| anyhow::anyhow!("invalid UUID in DB (id={id_str}): {e}"))?;
+
+        out.push(LogItem {
+            id,
+            tag: row.get(1)?,
+            time: row.get(2)?,
+            title: row.get(3)?,
+            artist: row.get(4)?,
+            state: row.get(5)?,
+            dur: row.get(6)?,
+            cart: row.get(7)?,
+        });
+    }
+
+    // Normalize state markers so the UI is consistent even if the DB contains older data.
+    normalize_log_state(&mut out);
+
+    Ok(Some(out))
+}
+
+fn db_save_queue(conn: &Connection, log: &[LogItem]) -> anyhow::Result<()> {
+    db_init(conn)?;
+
+    let tx = conn.transaction()?;
+
+    // Simple + safe approach: rewrite the table in one transaction.
+    // This keeps ordering consistent and avoids partial updates on crash.
+    tx.execute("DELETE FROM queue_items", [])?;
+
+    let mut position: i64 = 0;
+    for item in log {
+        tx.execute(
+            "INSERT INTO queue_items (id, position, tag, time, title, artist, state, dur, cart)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                item.id.to_string(),
+                position,
+                item.tag,
+                item.time,
+                item.title,
+                item.artist,
+                item.state,
+                item.dur,
+                item.cart
+            ],
+        )?;
+        position += 1;
+    }
+
+    tx.commit()?;
+    Ok(())
+}
+
+async fn load_queue_from_db_or_demo() -> Vec<LogItem> {
+    let path = db_path();
+    let res = tokio::task::spawn_blocking(move || -> anyhow::Result<Option<Vec<LogItem>>> {
+        let conn = Connection::open(path)?;
+        db_load_queue(&conn)
+    })
+    .await;
+
+    match res {
+        Ok(Ok(Some(log))) => log,
+        Ok(Ok(None)) => demo_log(),
+        Ok(Err(e)) => {
+            tracing::warn!("failed to load queue from sqlite, using demo queue: {e}");
+            demo_log()
+        }
+        Err(e) => {
+            tracing::warn!("failed to join sqlite load task, using demo queue: {e}");
+            demo_log()
+        }
+    }
+}
+
+async fn persist_queue(log: Vec<LogItem>) {
+    let path = db_path();
+    let _ = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+        let conn = Connection::open(path)?;
+        db_save_queue(&conn, &log)?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!(e))
+    .and_then(|x| x)
+    .map_err(|e| tracing::warn!("failed to persist queue to sqlite: {e}"));
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -93,9 +244,16 @@ async fn main() -> anyhow::Result<()> {
 
 // Demo playout state (v0): the UI now pulls this via /api/v1/status.
 // In later versions this becomes the real automation engine state.
+let log = load_queue_from_db_or_demo().await;
+
+// Ensure the current queue is persisted so restarts are deterministic.
+// This is cheap (single transaction) and makes initial installs predictable.
+persist_queue(log.clone()).await;
+
 let playout = PlayoutState {
     now: NowPlaying { title: "Neutron Dance".into(), artist: "Pointer Sisters".into(), dur: 242, pos: 0 },
-    log: demo_log(),
+    // Load the queue from SQLite if present; otherwise fall back to a demo queue.
+    log: log.clone(),
     producers: demo_producers(),
 };
 
@@ -415,6 +573,9 @@ async fn api_queue_remove(
     }
     p.log.remove(req.index);
     normalize_log_state(&mut p);
+
+    // Persist the updated queue so restarts keep the same order.
+    persist_queue(p.log.clone()).await;
     Ok(Json(json!({"ok": true})))
 }
 
@@ -433,6 +594,9 @@ async fn api_queue_move(
     let item = p.log.remove(req.from);
     p.log.insert(req.to, item);
     normalize_log_state(&mut p);
+
+    // Persist the updated queue so restarts keep the same order.
+    persist_queue(p.log.clone()).await;
     Ok(Json(json!({"ok": true})))
 }
 
@@ -483,6 +647,9 @@ async fn api_queue_reorder(
     p.log.extend(reordered);
     normalize_log_state(&mut p);
 
+    // Persist the updated queue so restarts keep the same order.
+    persist_queue(p.log.clone()).await;
+
     Ok(Json(json!({"ok": true})))
 }
 
@@ -504,6 +671,9 @@ async fn api_queue_insert(
     };
     p.log.insert(after+1, ins);
     normalize_log_state(&mut p);
+
+    // Persist the updated queue so restarts keep the same order.
+    persist_queue(p.log.clone()).await;
     Ok(Json(json!({"ok": true})))
 }
 

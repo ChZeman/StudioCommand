@@ -1,6 +1,6 @@
 [package]
 name = "studiocommand-engine"
-version = "0.1.27"
+version = "0.1.28"
 edition = "2021"
 
 [dependencies]
@@ -14,3 +14,4 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 sysinfo = "0.33"
 anyhow = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
+rusqlite = { version = "0.32", features = ["bundled"] }

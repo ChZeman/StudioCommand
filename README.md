@@ -73,3 +73,19 @@ This keeps UI deployment simple and avoids coupling the Rust binary to frontend 
 ### v0.1.27 UI note
 
 The queue UI shows Cart + a short ID suffix in the metadata row. This is intentionally verbose so you can validate reorder behavior even when track titles repeat (common in demo data).
+
+
+## Persistence (SQLite)
+StudioCommand persists the current queue ordering to a local SQLite database so restarts keep the same playlist order.
+
+- Default DB path: `/opt/studiocommand/shared/studiocommand.db`
+- Override with: `STUDIOCOMMAND_DB_PATH=/path/to/studiocommand.db`
+
+Why SQLite?
+- Transactional safety (no partial writes)
+- Simple operations (single file)
+- Good future fit for ingest/history
+
+Implementation notes:
+- Uses `WAL` journaling mode + `synchronous=NORMAL` for a good safety/performance balance.
+- Queue writes are performed in a single transaction that rewrites the ordered list.
