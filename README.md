@@ -14,7 +14,17 @@ cargo run
 ## Endpoints
 - `GET /health` -> `OK`
 - `GET /api/v1/system/info` -> version, arch, cpu, load, temp (best-effort)
+- `GET /api/v1/status` -> consolidated UI state (queue/log + now-playing + producers + system)
+- `POST /api/v1/queue/reorder` -> reorder upcoming queue items by UUID (playing item is pinned)
 - `GET /admin/api/v1/updates/status` -> stub status
+
+### Why `POST /api/v1/queue/reorder` is ID-based (not index-based)
+
+Drag-and-drop must be stable across refreshes and multi-client views. Indices are not stable because
+items can be inserted/removed at any time. The engine therefore assigns each queue item a UUID and the
+API accepts an ordered list of those UUIDs.
+
+Safety rule: the currently playing item is pinned at index `0` and cannot be reordered.
 
 ## Packaging
 See `packaging/` for `install.sh`, `studiocommand.service`, and an nginx template.

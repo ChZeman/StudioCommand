@@ -8,7 +8,9 @@ const qsa = (s) => Array.from(document.querySelectorAll(s));
 
 const TARGET_LOG_LEN = 12;
 
-const UI_VERSION = "0.1.14";
+// NOTE: UI_VERSION is purely informational (tooltip on the header).
+// The authoritative running version is exposed by the backend at /api/v1/status.
+const UI_VERSION = "0.1.24";
 
 const state = {
   role: "operator",
@@ -25,7 +27,15 @@ const state = {
     { name: "Michael", role: "Producer", onAir: false, conn: "WARN", jitter: "45ms", loss: "3.8%", camera: false },
   ],
   now: { title: "", artist: "", dur: 180, pos: 0, ends: "" },
-  apiLive: false,
+
+  // The UI can run in 2 modes:
+  // - DEMO: uses locally generated data and local-only queue editing.
+  // - LIVE: reflects /api/v1/status and uses backend endpoints.
+  //
+  // We keep this as an explicit string instead of a boolean so we can add
+  // additional modes later (e.g. "STALE" when the API is reachable but
+  // updates are delayed).
+  apiMode: "DEMO",
   lastStatusError: null,
   lastStatusAt: 0,
 };
@@ -193,7 +203,45 @@ async function fetchStatus(){
 
     const data = await r.json();
 
-    state.status = data;
+    // === LIVE MODE DATA FLOW ===
+    // We keep the UI intentionally "dumb": /api/v1/status is the single source of
+    // truth for queue + producer tiles + now-playing, and the UI simply renders it.
+    //
+    // This makes later features (drag/drop, remote producers, etc.) easier:
+    // - the UI never has to guess the canonical queue order
+    // - after any action we can just refetch /api/v1/status
+    // - the UI remains usable in DEMO mode when the engine is not running
+    state.apiMode = "LIVE";
+
+    // Playout queue (log)
+    state.log = Array.isArray(data.log) ? data.log : [];
+
+    // Now-playing (pos/dur are seconds in the API)
+    if(data.now && typeof data.now === "object"){
+      state.now = {
+        title: data.now.title || "",
+        artist: data.now.artist || "",
+        dur: Number(data.now.dur || 0) || 0,
+        pos: Number(data.now.pos || 0) || 0,
+        ends: "",
+      };
+    }
+
+    // Producers: the API uses a slightly different field naming than the DEMO tiles.
+    // We normalize here so renderProducers() stays unchanged.
+    if(Array.isArray(data.producers)){
+      state.producers = data.producers.map(p => ({
+        name: p.name || "(unknown)",
+        role: p.role || "Producer",
+        onAir: !!p.onAir,
+        conn: p.connected ? "OK" : "WARN",
+        jitter: p.jitter || "—",
+        loss: p.loss || "—",
+        camera: !!p.camOn,
+      }));
+    }
+
+    state.status = data; // keep raw around for debugging/inspection
     state.lastStatusAt = Date.now();
     state.lastStatusError = null;
 
@@ -204,6 +252,9 @@ async function fetchStatus(){
 
     const lastOk = state.lastStatusAt || 0;
     const ageMs = lastOk ? (Date.now() - lastOk) : Infinity;
+
+    // If we never had a successful fetch, we fall back to DEMO mode.
+    if(lastOk === 0) state.apiMode = "DEMO";
 
     if(lastOk > 0 && ageMs > 5000){
       setApiBadge("STALE", `LIVE (last update ${Math.round(ageMs/1000)}s ago). Error: ${state.lastStatusError}`);
@@ -240,6 +291,32 @@ function refillLog(){
   while(state.log.length < TARGET_LOG_LEN) state.log.push(makeNextQueueItem());
 }
 
+// --- Queue reordering helpers -------------------------------------------------
+// Why IDs?
+// Drag-and-drop reordering must be stable across refreshes and multi-user views.
+// Indices are not stable (items can be inserted/removed at any time). The backend
+// therefore exposes a UUID per item, and the reorder endpoint accepts an ordered
+// list of those UUIDs.
+
+function upcomingIdsFromState(){
+  // Backend guardrail: the currently playing item is pinned at index 0.
+  // Reordering applies only to the *upcoming* items (log[1..]).
+  return state.log.slice(1).map(it => it.id);
+}
+
+async function postUpcomingReorder(upcomingIds){
+  // The backend expects the full upcoming list, in the desired order.
+  // (Strictness keeps the API simple and prevents accidental partial moves.)
+  return await postAction("/api/v1/queue/reorder", { order: upcomingIds });
+}
+
+function moveWithinUpcoming(upcoming, fromUpcomingIdx, toUpcomingIdx){
+  const arr = upcoming.slice();
+  const it = arr.splice(fromUpcomingIdx, 1)[0];
+  arr.splice(toUpcomingIdx, 0, it);
+  return arr;
+}
+
 function renderLog(){
   const el = qs("#logList");
   el.innerHTML = "";
@@ -247,6 +324,53 @@ function renderLog(){
     const row = document.createElement("div");
     row.className = "log-item";
     row.tabIndex = 0;
+
+    // Drag-and-drop: enabled only for upcoming items (idx > 0).
+    // Rationale: pinning the playing row avoids surprising behavior and matches
+    // the backend safety guardrails.
+    const canDrag = idx > 0;
+    if(canDrag){
+      row.draggable = true;
+      row.dataset.idx = String(idx);
+      row.addEventListener("dragstart", (e) => {
+        row.classList.add("dragging");
+        e.dataTransfer.effectAllowed = "move";
+        e.dataTransfer.setData("text/plain", String(idx));
+      });
+      row.addEventListener("dragend", () => row.classList.remove("dragging"));
+      row.addEventListener("dragover", (e) => {
+        // Allow dropping on other upcoming rows.
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "move";
+      });
+      row.addEventListener("drop", async (e) => {
+        e.preventDefault();
+        const fromIdx = parseInt(e.dataTransfer.getData("text/plain"), 10);
+        const toIdx = idx;
+        if(!Number.isFinite(fromIdx) || fromIdx <= 0 || toIdx <= 0) return;
+        if(fromIdx === toIdx) return;
+
+        // Convert absolute indices into "upcoming" indices (0 == log[1]).
+        const fromUpcoming = fromIdx - 1;
+        const toUpcoming = toIdx - 1;
+
+        try{
+          if(state.apiMode === "LIVE"){
+            const upcoming = upcomingIdsFromState();
+            const newUpcoming = moveWithinUpcoming(upcoming, fromUpcoming, toUpcoming);
+            await postUpcomingReorder(newUpcoming);
+            await fetchStatus();
+          }else{
+            const it2 = state.log.splice(fromIdx, 1)[0];
+            state.log.splice(toIdx, 0, it2);
+          }
+          toast("Reordered");
+          renderLog();
+        }catch(err){
+          alert(err.message || String(err));
+        }
+      });
+    }
 
     const stripe = document.createElement("div");
     stripe.className = "log-stripe";
@@ -296,7 +420,7 @@ const mkBtn = (label, title, onClick) => {
   return b;
 };
 
-// Queue editing (v1): buttons instead of drag/drop.
+// Queue editing (v2): drag/drop + fallback buttons.
 // Guard rails: never mutate the currently playing row (idx=0).
 const canEdit = idx > 0;
 const canUp = canEdit && idx > 1;          // don't move above "playing"
@@ -305,24 +429,41 @@ const canDown = canEdit && idx < state.log.length - 1;
 const up = mkBtn("▲", "Move up", async () => {
   if(!canUp) return;
   try{
-    if(state.apiMode === "LIVE") await postAction("/api/v1/queue/move", { from: idx, to: idx-1 });
-    else { const it2 = state.log.splice(idx,1)[0]; state.log.splice(idx-1,0,it2); }
+    if(state.apiMode === "LIVE"){
+      const upcoming = upcomingIdsFromState();
+      // upcoming[0] corresponds to log[1]
+      const newUpcoming = moveWithinUpcoming(upcoming, idx-1, idx-2);
+      await postUpcomingReorder(newUpcoming);
+      await fetchStatus();
+    }else{
+      const it2 = state.log.splice(idx,1)[0];
+      state.log.splice(idx-1,0,it2);
+    }
     toast("Moved up");
   }catch(err){ alert(err.message || String(err)); }
 });
 const down = mkBtn("▼", "Move down", async () => {
   if(!canDown) return;
   try{
-    if(state.apiMode === "LIVE") await postAction("/api/v1/queue/move", { from: idx, to: idx+1 });
-    else { const it2 = state.log.splice(idx,1)[0]; state.log.splice(idx+1,0,it2); }
+    if(state.apiMode === "LIVE"){
+      const upcoming = upcomingIdsFromState();
+      const newUpcoming = moveWithinUpcoming(upcoming, idx-1, idx);
+      await postUpcomingReorder(newUpcoming);
+      await fetchStatus();
+    }else{
+      const it2 = state.log.splice(idx,1)[0];
+      state.log.splice(idx+1,0,it2);
+    }
     toast("Moved down");
   }catch(err){ alert(err.message || String(err)); }
 });
 const del = mkBtn("✕", "Remove from queue", async () => {
   if(!canEdit) return;
   try{
-    if(state.apiMode === "LIVE") await postAction("/api/v1/queue/remove", { index: idx });
-    else { state.log.splice(idx,1); }
+    // The backend doesn't expose a targeted "remove" yet. In LIVE mode we keep
+    // the UX safe by showing an explanatory message instead of silently failing.
+    if(state.apiMode === "LIVE") throw new Error("Remove not implemented on backend yet (queue/reorder only)");
+    state.log.splice(idx,1);
     toast("Removed");
   }catch(err){ alert(err.message || String(err)); }
 });
@@ -543,7 +684,7 @@ function tickVu(){
 function tickNowPlaying(){
   // When connected to the engine API, we do not advance the clock locally.
   // The engine is the source of truth for pos/dur.
-  if(!state.apiLive){
+  if(state.apiMode !== "LIVE"){
   if(state.log.length === 0){
     state.log.push(makeNextQueueItem());
     state.log[0].state = "playing";
@@ -660,6 +801,10 @@ function wireUI(){
 }
 
 function simulateStatus(){
+  // DEMO-only signal generator.
+  // In LIVE mode, producers + queue are authoritative from /api/v1/status.
+  if(state.apiMode === "LIVE") return;
+
   // Occasionally degrade remote (and reflect it in REMOTE badge)
   const p = state.producers[Math.floor(Math.random()*state.producers.length)];
   const degrade = Math.random() < 0.22;

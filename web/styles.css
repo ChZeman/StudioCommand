@@ -116,6 +116,11 @@ body{
   gap:10px;
   align-items:flex-start;
 }
+
+/* Drag & drop affordance for queue reordering.
+   We keep it subtle: the UI is meant to be "broadcast calm" even while editing. */
+.log-item[draggable="true"]{ cursor: grab; }
+.log-item.dragging{ opacity: .55; cursor: grabbing; }
 .log-stripe{width:6px; border-radius:999px; margin-top:2px}
 .log-main{flex:1; min-width:0}
 .log-top{display:flex; gap:8px; align-items:center}
