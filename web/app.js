@@ -10,7 +10,7 @@ const TARGET_LOG_LEN = 12;
 
 // NOTE: UI_VERSION is purely informational (tooltip on the header).
 // The authoritative running version is exposed by the backend at /api/v1/status.
-const UI_VERSION = "0.1.24";
+const UI_VERSION = "0.1.25";
 
 const state = {
   role: "operator",
@@ -38,6 +38,13 @@ const state = {
   apiMode: "DEMO",
   lastStatusError: null,
   lastStatusAt: 0,
+
+  // Drag-and-drop interaction state.
+  // Rationale: we poll /api/v1/status every second in LIVE mode. Re-rendering the
+  // queue while a drag gesture is in progress can cancel the drag in some
+  // browsers. We therefore defer re-rendering while dragging.
+  isDraggingLog: false,
+  pendingRenderAfterDrag: false,
 };
 
 function pad(n){ return String(n).padStart(2,'0');}
@@ -246,7 +253,14 @@ async function fetchStatus(){
     state.lastStatusError = null;
 
     setApiBadge("LIVE");
-    if (typeof window.SC_render === "function") window.SC_render();
+
+    // Re-render immediately unless the operator is currently dragging a log row.
+    // (See state.isDraggingLog for rationale.)
+    if(state.isDraggingLog){
+      state.pendingRenderAfterDrag = true;
+    }else{
+      renderAll();
+    }
 }catch(e){
     state.lastStatusError = (e && e.message) ? e.message : String(e);
 
@@ -264,7 +278,12 @@ async function fetchStatus(){
       setApiBadge("DEMO", `DEMO (API error: ${state.lastStatusError})`);
     }
 
-    if (typeof window.SC_render === "function") window.SC_render();
+    // In DEMO mode (or transient error), we still re-render so badges and tiles update.
+    if(state.isDraggingLog){
+      state.pendingRenderAfterDrag = true;
+    }else{
+      renderAll();
+    }
 }
 }
 
@@ -317,6 +336,20 @@ function moveWithinUpcoming(upcoming, fromUpcomingIdx, toUpcomingIdx){
   return arr;
 }
 
+// Re-render helpers ----------------------------------------------------------
+// We keep rendering centralized so LIVE polling can safely trigger updates.
+// This also makes it easier to pause queue re-renders during drag gestures.
+function renderAll(){
+  renderApiBadge();
+  renderLog();
+  renderProducers();
+  renderLibrary();
+  renderCarts();
+  // Now-playing/VU are already driven by tickNowPlaying/tickVu, but the initial
+  // paint still benefits from re-rendering derived fields.
+  setVuUI();
+}
+
 function renderLog(){
   const el = qs("#logList");
   el.innerHTML = "";
@@ -333,11 +366,19 @@ function renderLog(){
       row.draggable = true;
       row.dataset.idx = String(idx);
       row.addEventListener("dragstart", (e) => {
+        state.isDraggingLog = true;
         row.classList.add("dragging");
         e.dataTransfer.effectAllowed = "move";
         e.dataTransfer.setData("text/plain", String(idx));
       });
-      row.addEventListener("dragend", () => row.classList.remove("dragging"));
+      row.addEventListener("dragend", () => {
+        row.classList.remove("dragging");
+        state.isDraggingLog = false;
+        if(state.pendingRenderAfterDrag){
+          state.pendingRenderAfterDrag = false;
+          renderAll();
+        }
+      });
       row.addEventListener("dragover", (e) => {
         // Allow dropping on other upcoming rows.
         e.preventDefault();
@@ -363,9 +404,9 @@ function renderLog(){
           }else{
             const it2 = state.log.splice(fromIdx, 1)[0];
             state.log.splice(toIdx, 0, it2);
+            renderLog();
           }
           toast("Reordered");
-          renderLog();
         }catch(err){
           alert(err.message || String(err));
         }
