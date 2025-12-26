@@ -15,7 +15,8 @@ use axum::{
             routing::{get, post},
     Json, Router,
 };
-use serde::Serialize;
+use serde::{Serialize, Deserialize};
+use uuid::Uuid;
 use sysinfo::System;
 use tracing::{info, warn};
 
@@ -26,8 +27,9 @@ struct AppState {
     playout: Arc<tokio::sync::RwLock<PlayoutState>>,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct LogItem {
+    id: Uuid,
     tag: String,
     time: String,
     title: String,
@@ -131,6 +133,7 @@ fn build_router(state: AppState) -> Router {
         .route("/api/v1/transport/reload", post(api_transport_reload))
         .route("/api/v1/queue/remove", post(api_queue_remove))
         .route("/api/v1/queue/move", post(api_queue_move))
+        .route("/api/v1/queue/reorder", post(api_queue_reorder))
         .route("/api/v1/queue/insert", post(api_queue_insert))
         .route("/", get(root))
         .route("/health", get(|| async { "OK" }))
@@ -145,10 +148,10 @@ fn build_router(state: AppState) -> Router {
 
 fn demo_log() -> Vec<LogItem> {
     vec![
-        LogItem{ tag:"MUS".into(), time:"Now".into(), title:"Neutron Dance".into(), artist:"Pointer Sisters".into(), state:"playing".into(), dur:"4:02".into(), cart:"080-0861".into() },
-        LogItem{ tag:"MUS".into(), time:"+0:00".into(), title:"Super Freak (Part 1)".into(), artist:"Rick James".into(), state:"next".into(), dur:"3:14".into(), cart:"080-1588".into() },
-        LogItem{ tag:"MUS".into(), time:"+3:14".into(), title:"Bette Davis Eyes".into(), artist:"Kim Carnes".into(), state:"queued".into(), dur:"3:30".into(), cart:"080-6250".into() },
-        LogItem{ tag:"MUS".into(), time:"+6:44".into(), title:"Jessie's Girl".into(), artist:"Rick Springfield".into(), state:"queued".into(), dur:"3:07".into(), cart:"080-1591".into() },
+        LogItem{ id: Uuid::new_v4(), tag:"MUS".into(), time:"Now".into(), title:"Neutron Dance".into(), artist:"Pointer Sisters".into(), state:"playing".into(), dur:"4:02".into(), cart:"080-0861".into() },
+        LogItem{ id: Uuid::new_v4(), tag:"MUS".into(), time:"+0:00".into(), title:"Super Freak (Part 1)".into(), artist:"Rick James".into(), state:"next".into(), dur:"3:14".into(), cart:"080-1588".into() },
+        LogItem{ id: Uuid::new_v4(), tag:"MUS".into(), time:"+3:14".into(), title:"Bette Davis Eyes".into(), artist:"Kim Carnes".into(), state:"queued".into(), dur:"3:30".into(), cart:"080-6250".into() },
+        LogItem{ id: Uuid::new_v4(), tag:"MUS".into(), time:"+6:44".into(), title:"Jessie's Girl".into(), artist:"Rick Springfield".into(), state:"queued".into(), dur:"3:07".into(), cart:"080-1591".into() },
     ]
 }
 
@@ -211,7 +214,7 @@ async fn playout_tick(playout: Arc<tokio::sync::RwLock<PlayoutState>>) {
             // Keep a few queued items; in real engine this comes from scheduler.
             while p.log.len() < 8 {
                 let n = p.log.len();
-                p.log.push(LogItem{
+                p.log.push(LogItem{ id: Uuid::new_v4(),
                     tag:"MUS".into(),
                     time:format!("+{}", n),
                     title:format!("Queued Track {}", n),
@@ -386,6 +389,10 @@ struct QueueRemoveReq { index: usize }
 struct QueueMoveReq { from: usize, to: usize }
 
 #[derive(serde::Deserialize)]
+struct QueueReorderReq { order: Vec<Uuid> }
+
+
+#[derive(serde::Deserialize)]
 struct QueueInsertReq { after: usize, item: QueueInsertItem }
 
 #[derive(serde::Deserialize)]
@@ -429,6 +436,56 @@ async fn api_queue_move(
     Ok(Json(json!({"ok": true})))
 }
 
+
+async fn api_queue_reorder(
+    State(state): State<AppState>,
+    Json(req): Json<QueueReorderReq>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    // Reorder upcoming items in the queue using stable item IDs.
+    // Index 0 is "playing" and is pinned.
+    let mut p = state.playout.write().await;
+
+    if p.log.len() <= 1 {
+        return Ok(Json(json!({"ok": true})));
+    }
+
+    // We reorder only the upcoming items (everything after the playing item).
+    // Require a full list for determinism.
+    let upcoming_len = p.log.len() - 1;
+    if req.order.len() != upcoming_len {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    // Build a lookup for upcoming items.
+    use std::collections::{HashMap, HashSet};
+    let mut by_id: HashMap<Uuid, LogItem> = HashMap::with_capacity(upcoming_len);
+    for item in p.log.drain(1..) {
+        by_id.insert(item.id, item);
+    }
+
+    // Validate: no duplicates and all IDs exist.
+    let mut seen: HashSet<Uuid> = HashSet::with_capacity(req.order.len());
+    let mut reordered: Vec<LogItem> = Vec::with_capacity(upcoming_len);
+
+    for id in &req.order {
+        if !seen.insert(*id) {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        let item = by_id.remove(id).ok_or(StatusCode::BAD_REQUEST)?;
+        reordered.push(item);
+    }
+
+    // Defensive: append any stragglers (should be none due to strict length check).
+    reordered.extend(by_id.into_values());
+
+    // Put the playing item back at the front and normalize state markers.
+    // (We drained from index 1.. above, so p.log currently has exactly the playing item.)
+    p.log.extend(reordered);
+    normalize_log_state(&mut p);
+
+    Ok(Json(json!({"ok": true})))
+}
+
 async fn api_queue_insert(
     State(state): State<AppState>,
     Json(req): Json<QueueInsertReq>,
@@ -436,7 +493,7 @@ async fn api_queue_insert(
     // Insert a cart after a given index (e.g., after "next" => after=1).
     let mut p = state.playout.write().await;
     let after = req.after.min(p.log.len().saturating_sub(1));
-    let ins = LogItem{
+    let ins = LogItem{ id: Uuid::new_v4(),
         tag: req.item.tag,
         time: "--:--".into(),
         title: req.item.title,
@@ -477,11 +534,11 @@ fn reset_demo_playout(p: &mut PlayoutState) {
     p.now.pos = 0;
 
     p.log = vec![
-        LogItem{ tag:"MUS".into(), time:"15:33".into(), title:"Lean On Me".into(), artist:"Club Nouveau".into(), state:"playing".into(), dur:"3:48".into(), cart:"080-0599".into() },
-        LogItem{ tag:"MUS".into(), time:"15:37".into(), title:"Bette Davis Eyes".into(), artist:"Kim Carnes".into(), state:"queued".into(), dur:"3:30".into(), cart:"080-6250".into() },
-        LogItem{ tag:"MUS".into(), time:"15:41".into(), title:"Talk Dirty To Me".into(), artist:"Poison".into(), state:"queued".into(), dur:"3:42".into(), cart:"080-4577".into() },
-        LogItem{ tag:"EVT".into(), time:"15:45".into(), title:"TOH Legal ID".into(), artist:"".into(), state:"locked".into(), dur:"0:10".into(), cart:"ID-TOH".into() },
-        LogItem{ tag:"MUS".into(), time:"15:46".into(), title:"Jessie's Girl".into(), artist:"Rick Springfield".into(), state:"queued".into(), dur:"3:07".into(), cart:"080-1591".into() },
+        LogItem{ id: Uuid::new_v4(), tag:"MUS".into(), time:"15:33".into(), title:"Lean On Me".into(), artist:"Club Nouveau".into(), state:"playing".into(), dur:"3:48".into(), cart:"080-0599".into() },
+        LogItem{ id: Uuid::new_v4(), tag:"MUS".into(), time:"15:37".into(), title:"Bette Davis Eyes".into(), artist:"Kim Carnes".into(), state:"queued".into(), dur:"3:30".into(), cart:"080-6250".into() },
+        LogItem{ id: Uuid::new_v4(), tag:"MUS".into(), time:"15:41".into(), title:"Talk Dirty To Me".into(), artist:"Poison".into(), state:"queued".into(), dur:"3:42".into(), cart:"080-4577".into() },
+        LogItem{ id: Uuid::new_v4(), tag:"EVT".into(), time:"15:45".into(), title:"TOH Legal ID".into(), artist:"".into(), state:"locked".into(), dur:"0:10".into(), cart:"ID-TOH".into() },
+        LogItem{ id: Uuid::new_v4(), tag:"MUS".into(), time:"15:46".into(), title:"Jessie's Girl".into(), artist:"Rick Springfield".into(), state:"queued".into(), dur:"3:07".into(), cart:"080-1591".into() },
     ];
 
     // Ensure "next" is marked consistently.
