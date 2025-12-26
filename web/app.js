@@ -45,6 +45,14 @@ const state = {
   // browsers. We therefore defer re-rendering while dragging.
   isDraggingLog: false,
   pendingRenderAfterDrag: false,
+
+  // Flash-highlight support: after a successful reorder action we capture the
+  // previous log order and, on the next /api/v1/status refresh, compute which
+  // items changed index. This yields a deterministic "what moved" highlight even
+  // when many titles are identical.
+  flashArmed: false,
+  flashPrevOrder: [], // array of UUID strings (full log order before reorder)
+  flashIds: new Set(), // UUID strings to flash on next render
 };
 
 function pad(n){ return String(n).padStart(2,'0');}
@@ -223,6 +231,25 @@ async function fetchStatus(){
     // Playout queue (log)
     state.log = Array.isArray(data.log) ? data.log : [];
 
+// If a reorder action just completed, compute which items *actually* moved.
+// We do this here (after we ingest the fresh log) so the highlight reflects
+// the authoritative backend order.
+if(state.flashArmed && Array.isArray(state.flashPrevOrder) && state.flashPrevOrder.length){
+  const prev = state.flashPrevOrder;
+  const next = state.log.map(it => it.id);
+  const moved = [];
+  for(let i = 1; i < next.length; i++){
+    const id = next[i];
+    const pi = prev.indexOf(id);
+    if(pi !== -1 && pi !== i){
+      moved.push(id);
+    }
+  }
+  state.flashIds = new Set(moved);
+  state.flashArmed = false;
+  state.flashPrevOrder = [];
+}
+
     // Now-playing (pos/dur are seconds in the API)
     if(data.now && typeof data.now === "object"){
       state.now = {
@@ -329,6 +356,17 @@ async function postUpcomingReorder(upcomingIds){
   return await postAction("/api/v1/queue/reorder", { order: upcomingIds });
 }
 
+
+function armFlashForReorder(){
+  // Called immediately before we request a reorder.
+  // We snapshot the current order as the "before" picture. After the reorder
+  // completes, we refetch /api/v1/status and compare the "after" order to this
+  // snapshot to determine which items actually moved.
+  state.flashPrevOrder = state.log.map(it => it.id);
+  state.flashArmed = true;
+}
+
+
 function moveWithinUpcoming(upcoming, fromUpcomingIdx, toUpcomingIdx){
   const arr = upcoming.slice();
   const it = arr.splice(fromUpcomingIdx, 1)[0];
@@ -357,6 +395,12 @@ function renderLog(){
     const row = document.createElement("div");
     row.className = "log-item";
     row.tabIndex = 0;
+
+    // If this item was part of the last reorder operation, briefly flash it so
+    // the operator can visually confirm what moved.
+    if(idx > 0 && state.flashIds && state.flashIds.has(it.id)){
+      row.classList.add("flash");
+    }
 
     // Drag-and-drop: enabled only for upcoming items (idx > 0).
     // Rationale: pinning the playing row avoids surprising behavior and matches
@@ -399,6 +443,7 @@ function renderLog(){
           if(state.apiMode === "LIVE"){
             const upcoming = upcomingIdsFromState();
             const newUpcoming = moveWithinUpcoming(upcoming, fromUpcoming, toUpcoming);
+            armFlashForReorder();
             await postUpcomingReorder(newUpcoming);
             await fetchStatus();
           }else{
@@ -474,6 +519,7 @@ const up = mkBtn("▲", "Move up", async () => {
       const upcoming = upcomingIdsFromState();
       // upcoming[0] corresponds to log[1]
       const newUpcoming = moveWithinUpcoming(upcoming, idx-1, idx-2);
+      armFlashForReorder();
       await postUpcomingReorder(newUpcoming);
       await fetchStatus();
     }else{
@@ -489,6 +535,7 @@ const down = mkBtn("▼", "Move down", async () => {
     if(state.apiMode === "LIVE"){
       const upcoming = upcomingIdsFromState();
       const newUpcoming = moveWithinUpcoming(upcoming, idx-1, idx);
+      armFlashForReorder();
       await postUpcomingReorder(newUpcoming);
       await fetchStatus();
     }else{
@@ -531,6 +578,11 @@ meta.appendChild(actions);
 
     el.appendChild(row);
   });
+
+  // Clear one-shot flash markers so normal polling does not replay the animation.
+  if(state.flashIds && state.flashIds.size){
+    state.flashIds = new Set();
+  }
 }
 
 function renderProducers(){

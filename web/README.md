@@ -43,3 +43,21 @@ python3 -m http.server 8080
 ```
 
 Upload the folder contents to any static web host and open `index.html`.
+
+
+## Visual confirmation after reorder (flash highlight)
+
+Many demo queues contain repeated titles (e.g., "Queued Track 7"), which makes it
+hard to tell whether a drag/drop or ▲/▼ action actually moved the intended row.
+
+After a successful reorder action, the UI briefly **flash-highlights** any row
+whose index changed in the authoritative queue returned by `/api/v1/status`.
+
+Why we implement it this way:
+
+- We **diff by UUID** (stable identity), not by text labels.
+- We only flash after a **user-initiated reorder**, not during normal polling,
+  so the UI doesn't feel noisy.
+- The animation is **CSS-driven** (JS only toggles a class), which keeps the
+  code small and avoids timers.
+

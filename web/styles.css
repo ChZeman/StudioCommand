@@ -117,6 +117,18 @@ body{
   align-items:flex-start;
 }
 
+/* Flash highlight (v0.1.27)
+   Rationale: many demo items can have identical titles; a brief visual flash
+   confirms the operator's reorder action landed where expected. */
+.log-item.flash{
+  animation: flash-move 0.6s ease-out;
+}
+@keyframes flash-move{
+  from{ background-color: rgba(255,230,150,.9); }
+  to{ background-color: transparent; }
+}
+
+
 /* Drag & drop affordance for queue reordering.
    We keep it subtle: the UI is meant to be "broadcast calm" even while editing. */
 .log-item[draggable="true"]{ cursor: grab; }
@@ -436,7 +448,7 @@ button.mini{ font: inherit; font-size: 12px; padding: 2px 8px; border-radius: 10
 button.mini:hover{ border-color: rgba(79,156,255,.55); }
 button.mini:disabled{ opacity: .35; cursor: default; }
 
-/* v0.1.26: Make meta fields readable when titles repeat. */
+/* v0.1.27: Make meta fields readable when titles repeat. */
 .meta span{margin-right:12px;}
 .meta span:last-child{margin-right:0;}
 .meta span:nth-child(3), .meta span:nth-child(4){font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size: 12px; opacity: 0.85;}
