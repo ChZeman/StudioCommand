@@ -447,7 +447,7 @@ function renderLog(){
 
     const meta = document.createElement("div");
     meta.className = "meta";
-    meta.innerHTML = `<span>Dur: ${it.dur}</span>`;
+    meta.innerHTML = `<span>Dur: ${it.dur}</span><span>Cart: ${it.cart}</span><span>ID: ${(it.id||"").slice(0,8)}</span><span>#${idx}</span>`;
 const actions = document.createElement("span");
 actions.className = "log-actions";
 

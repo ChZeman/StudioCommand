@@ -435,3 +435,8 @@ kbd{
 button.mini{ font: inherit; font-size: 12px; padding: 2px 8px; border-radius: 10px; border: 1px solid rgba(127,138,160,.35); background: rgba(12,16,24,.55); color: rgba(230,236,255,.92); cursor: pointer; }
 button.mini:hover{ border-color: rgba(79,156,255,.55); }
 button.mini:disabled{ opacity: .35; cursor: default; }
+
+/* v0.1.26: Make meta fields readable when titles repeat. */
+.meta span{margin-right:12px;}
+.meta span:last-child{margin-right:0;}
+.meta span:nth-child(3), .meta span:nth-child(4){font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size: 12px; opacity: 0.85;}

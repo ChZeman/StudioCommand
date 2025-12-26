@@ -68,3 +68,8 @@ StudioCommand uses a split model:
 - The **engine** listens privately on `127.0.0.1:3000` and serves the API (`/api/*`) and WebSockets (`/ws/*`).
 
 This keeps UI deployment simple and avoids coupling the Rust binary to frontend assets.
+
+
+### v0.1.26 UI note
+
+The queue UI shows Cart + a short ID suffix in the metadata row. This is intentionally verbose so you can validate reorder behavior even when track titles repeat (common in demo data).
