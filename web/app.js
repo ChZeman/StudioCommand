@@ -10,7 +10,7 @@ const TARGET_LOG_LEN = 12;
 
 // NOTE: UI_VERSION is purely informational (tooltip on the header).
 // The authoritative running version is exposed by the backend at /api/v1/status.
-const UI_VERSION = "0.1.31";
+const UI_VERSION = "0.1.32";
 
 const state = {
   role: "operator",
@@ -461,6 +461,10 @@ function renderLog(){
     const row = document.createElement("div");
     row.className = "log-item";
     row.tabIndex = 0;
+    // Keyboard support (v0.1.32): store the absolute queue index on every row.
+    // We keep this even for the pinned playing row (idx=0) so the handler can
+    // quickly reject unsafe moves without needing to infer indices from DOM.
+    row.dataset.idx = String(idx);
 
     // If this item was part of the last reorder operation, briefly flash it so
     // the operator can visually confirm what moved.
@@ -474,7 +478,6 @@ function renderLog(){
     const canDrag = idx > 0;
     if(canDrag){
       row.draggable = true;
-      row.dataset.idx = String(idx);
       row.addEventListener("dragstart", (e) => {
         state.isDraggingLog = true;
         row.classList.add("dragging");
@@ -646,7 +649,10 @@ meta.appendChild(actions);
     row.appendChild(main);
 
     if(idx === state.selectedLogIndex) row.style.outline = "2px solid rgba(79,156,255,.55)";
+    // Click + focus both select a row.
+    // Rationale: keyboard reordering uses the selected row as the target.
     row.addEventListener("click", () => { state.selectedLogIndex = idx; renderLog(); });
+    row.addEventListener("focus", () => { state.selectedLogIndex = idx; renderLog(); });
 
     el.appendChild(row);
   });
@@ -967,6 +973,64 @@ function wireUI(){
         e.preventDefault();
         undoLastReorder();
       }
+      return;
+    }
+
+    // Keyboard queue reordering (v0.1.32)
+    // Alt+Up / Alt+Down moves the currently focused queue row.
+    // Design goals:
+    //  - fast, muscle-memory-friendly operators workflow
+    //  - accessibility (works without drag-and-drop)
+    //  - preserves backend invariants: never move the "playing" row (idx=0)
+    if(e.altKey && (key === "arrowup" || key === "arrowdown")){
+      const active = document.activeElement;
+      const idx = active && active.classList && active.classList.contains("log-item")
+        ? parseInt(active.dataset.idx || "0", 10)
+        : state.selectedLogIndex;
+
+      // Guard rails: only upcoming items (idx > 0) are movable.
+      if(!Number.isFinite(idx) || idx <= 0) return;
+
+      const dir = (key === "arrowup") ? -1 : 1;
+      const newIdx = idx + dir;
+
+      // Do not cross the pinned playing row or fall off the list.
+      if(newIdx <= 0 || newIdx >= state.log.length) return;
+
+      e.preventDefault();
+
+      (async () => {
+        try{
+          if(state.apiMode === "LIVE"){
+            const upcoming = upcomingIdsFromState();
+            // upcoming[0] corresponds to log[1]
+            const fromUpcoming = idx - 1;
+            const toUpcoming = newIdx - 1;
+            const newUpcoming = moveWithinUpcoming(upcoming, fromUpcoming, toUpcoming);
+            armUndoForReorder();
+            armFlashForReorder();
+            await postUpcomingReorder(newUpcoming);
+            commitUndoForReorder();
+            await fetchStatus();
+          }else{
+            const it2 = state.log.splice(idx, 1)[0];
+            state.log.splice(newIdx, 0, it2);
+            renderLog();
+          }
+
+          // After the DOM re-renders, focus the moved row so repeated key presses
+          // continue to act on the same item.
+          requestAnimationFrame(() => {
+            const rows = qsa("#logList .log-item");
+            const target = rows.find(r => (r.dataset && parseInt(r.dataset.idx||"0",10)) === newIdx);
+            if(target) target.focus();
+          });
+
+          toast(dir < 0 ? "Moved up" : "Moved down");
+        }catch(err){
+          alert(err.message || String(err));
+        }
+      })();
       return;
     }
     if(key === "escape") closeDrawers();

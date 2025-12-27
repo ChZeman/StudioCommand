@@ -74,6 +74,27 @@ spot when titles repeat. The UI therefore provides a single-level **Undo**:
   and a richer history model.
 
 
+## Keyboard reorder (Alt+Up / Alt+Down)
+
+Drag-and-drop is great, but operators also benefit from fast, precise keyboard
+controls (and keyboard support improves accessibility).
+
+- Focus any upcoming queue row (click it, or tab to it).
+- Press **Alt+↑** to move the row up.
+- Press **Alt+↓** to move the row down.
+
+Guard rails:
+
+- The pinned **playing** row (index `0`) cannot be moved.
+- Keyboard reorder uses the same backend-safe API as drag-and-drop:
+  `POST /api/v1/queue/reorder` with the full ordered list of upcoming UUIDs.
+
+Implementation note:
+
+- After a keyboard move succeeds, the UI re-focuses the moved row so repeated
+  key presses continue to act on the same item.
+
+
 
 ## Persistence
 The engine persists queue state (including UUIDs used for reordering) to SQLite. The UI simply reflects `/api/v1/status`.
