@@ -174,12 +174,18 @@ post_install_check() {
     ff="$(command -v ffmpeg)"
     echo "  - ffmpeg: FOUND (${ff})"
     # Encoder checks (best-effort; do not fail install)
-    if ffmpeg -hide_banner -encoders 2>/dev/null | grep -qE '^[[:space:]]*A[[:space:]]+libmp3lame[[:space:]]'; then
+    # We avoid grepping on formatted columns because ffmpeg's output spacing can vary.
+    has_encoder() {
+      local enc="$1"
+      ffmpeg -hide_banner -encoders 2>/dev/null | awk '{print $2}' | grep -Fxq "${enc}"
+    }
+
+    if has_encoder "libmp3lame"; then
       echo "  - MP3 encoder (libmp3lame): AVAILABLE"
     else
       echo "  - MP3 encoder (libmp3lame): NOT FOUND (streaming MP3 may not work)"
     fi
-    if ffmpeg -hide_banner -encoders 2>/dev/null | grep -qE '^[[:space:]]*A[[:space:]]+aac[[:space:]]'; then
+    if has_encoder "aac"; then
       echo "  - AAC encoder (aac): AVAILABLE"
     else
       echo "  - AAC encoder (aac): NOT FOUND (streaming AAC may not work)"
