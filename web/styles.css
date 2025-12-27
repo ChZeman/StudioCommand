@@ -118,6 +118,8 @@ body{
   align-items:flex-start;
 }
 
+.log-item.selected{ outline:2px solid rgba(79,156,255,.55); }
+
 /* Flash highlight (v0.1.27)
    Rationale: many demo items can have identical titles; a brief visual flash
    confirms the operator's reorder action landed where expected. */

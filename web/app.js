@@ -458,77 +458,35 @@ function renderAll(){
 function renderLog(){
   const el = qs("#logList");
   el.innerHTML = "";
+
+  // Render rows. We keep this function pure (no network calls, no event wiring).
+  // All queue interaction handlers are installed once via event delegation in
+  // wireQueueInteractionHandlers(). This avoids brittle per-row listeners which
+  // can be lost during frequent LIVE polling re-renders.
   state.log.forEach((it, idx) => {
     const row = document.createElement("div");
     row.className = "log-item";
     row.tabIndex = 0;
-    // Keyboard support (v0.1.33): store the absolute queue index on every row.
-    // We keep this even for the pinned playing row (idx=0) so the handler can
-    // quickly reject unsafe moves without needing to infer indices from DOM.
+
+    // Stable identifiers used by delegated handlers.
     row.dataset.idx = String(idx);
     row.dataset.id = it.id || "";
 
-    // If this item was part of the last reorder operation, briefly flash it so
-    // the operator can visually confirm what moved.
-    if(idx > 0 && state.flashIds && state.flashIds.has(it.id)){
+    // Drag-and-drop is only allowed for upcoming items (idx > 0). Pinning the
+    // playing row avoids surprising behavior and matches backend guardrails.
+    row.draggable = (idx > 0);
+
+    // Flash-highlight (one-shot) for items that moved during the last reorder.
+    if(idx > 0 && state.flashIds && it.id && state.flashIds.has(it.id)){
       row.classList.add("flash");
     }
 
-    // Drag-and-drop: enabled only for upcoming items (idx > 0).
-    // Rationale: pinning the playing row avoids surprising behavior and matches
-    // the backend safety guardrails.
-    const canDrag = idx > 0;
-    if(canDrag){
-      row.draggable = true;
-      row.addEventListener("dragstart", (e) => {
-        state.isDraggingLog = true;
-        row.classList.add("dragging");
-        e.dataTransfer.effectAllowed = "move";
-        e.dataTransfer.setData("text/plain", String(idx));
-      });
-      row.addEventListener("dragend", () => {
-        row.classList.remove("dragging");
-        state.isDraggingLog = false;
-        if(state.pendingRenderAfterDrag){
-          state.pendingRenderAfterDrag = false;
-          renderAll();
-        }
-      });
-      row.addEventListener("dragover", (e) => {
-        // Allow dropping on other upcoming rows.
-        e.preventDefault();
-        e.dataTransfer.dropEffect = "move";
-      });
-      row.addEventListener("drop", async (e) => {
-        e.preventDefault();
-        const fromIdx = parseInt(e.dataTransfer.getData("text/plain"), 10);
-        const toIdx = idx;
-        if(!Number.isFinite(fromIdx) || fromIdx <= 0 || toIdx <= 0) return;
-        if(fromIdx === toIdx) return;
-
-        // Convert absolute indices into "upcoming" indices (0 == log[1]).
-        const fromUpcoming = fromIdx - 1;
-        const toUpcoming = toIdx - 1;
-
-        try{
-          if(state.apiMode === "LIVE"){
-            const upcoming = upcomingIdsFromState();
-            const newUpcoming = moveWithinUpcoming(upcoming, fromUpcoming, toUpcoming);
-            armUndoForReorder();
-            armFlashForReorder();
-            await postUpcomingReorder(newUpcoming);
-            commitUndoForReorder();
-            await fetchStatus();
-          }else{
-            const it2 = state.log.splice(fromIdx, 1)[0];
-            state.log.splice(toIdx, 0, it2);
-            renderLog();
-          }
-          toast("Reordered");
-        }catch(err){
-          alert(err.message || String(err));
-        }
-      });
+    // Selection (for keyboard reorder). IMPORTANT: do not re-render synchronously
+    // on click/focus; doing so can swallow the click that also targets ▲/▼ buttons.
+    const isSelected = (state.selectedLogId && it.id === state.selectedLogId)
+      || (!state.selectedLogId && idx === state.selectedLogIndex);
+    if(isSelected){
+      row.classList.add("selected");
     }
 
     const stripe = document.createElement("div");
@@ -565,52 +523,42 @@ function renderLog(){
 
     const meta = document.createElement("div");
     meta.className = "meta";
-    meta.innerHTML = `<span>Dur: ${it.dur}</span><span>Cart: ${it.cart}</span><span>ID: ${(it.id||"").slice(0,8)}</span><span>#${idx}</span>`;
-const actions = document.createElement("span");
-actions.className = "log-actions";
 
-const mkBtn = (label, title, action) => {
-  // NOTE: We intentionally do NOT attach per-button click handlers here.
-  // The log is re-rendered frequently (polling), and per-node listeners are easy
-  // to accidentally lose or duplicate. Instead we use a single delegated handler
-  // attached once to the log container (see wireLogDelegatedHandlers()).
-  const b = document.createElement("button");
-  b.className = "mini";
-  b.type = "button";
-  b.textContent = label;
-  b.title = title;
-  b.setAttribute("aria-label", title);
-  b.dataset.action = action;
-  return b;
-};
+    // Meta line includes a short ID prefix + index so identical titles remain testable.
+    const idShort = (it.id || "").slice(0,8);
+    meta.innerHTML = `<span>Dur: ${it.dur}</span><span>Cart: ${it.cart}</span><span>ID: ${idShort}</span><span>#${idx}</span>`;
 
-// Queue editing (v3): drag/drop + delegated ▲/▼ click handling.
-// Guard rails: never mutate the currently playing row (idx=0).
-const canEdit = idx > 0;
-const canUp = canEdit && idx > 1;          // don't move above "playing"
-const canDown = canEdit && idx < state.log.length - 1;
+    // Action buttons (delegated click handling).
+    const actions = document.createElement("span");
+    actions.className = "log-actions";
 
-const up = mkBtn("▲", "Move up", "up");
-const down = mkBtn("▼", "Move down", "down");
-const del = mkBtn("✕", "Remove from queue", "remove");
+    const mkBtn = (label, title, action) => {
+      const b = document.createElement("button");
+      b.className = "mini";
+      b.type = "button";
+      b.textContent = label;
+      b.title = title;
+      b.setAttribute("aria-label", title);
+      b.dataset.action = action;
+      return b;
+    };
 
-if(!canUp) up.disabled = true;
-if(!canDown) down.disabled = true;
-if(!canEdit) del.disabled = true;
+    const canEdit = idx > 0;
+    const canUp = canEdit && idx > 1;                 // don't move above "playing"
+    const canDown = canEdit && idx < state.log.length - 1;
 
-actions.appendChild(up);
-actions.appendChild(down);
-actions.appendChild(del);
-meta.appendChild(actions);
-if(!canUp) up.disabled = true;
-if(!canDown) down.disabled = true;
-if(!canEdit) del.disabled = true;
+    const up = mkBtn("▲", "Move up", "up");
+    const down = mkBtn("▼", "Move down", "down");
+    const del = mkBtn("✕", "Remove from queue", "remove");
 
-actions.appendChild(up);
-actions.appendChild(down);
-actions.appendChild(del);
-meta.appendChild(actions);
+    if(!canUp) up.disabled = true;
+    if(!canDown) down.disabled = true;
+    if(!canEdit) del.disabled = true;
 
+    actions.appendChild(up);
+    actions.appendChild(down);
+    actions.appendChild(del);
+    meta.appendChild(actions);
 
     main.appendChild(top);
     if(it.artist) main.appendChild(artist);
@@ -619,31 +567,6 @@ meta.appendChild(actions);
     row.appendChild(stripe);
     row.appendChild(main);
 
-    // Selection + focus (v0.1.33)
-    // Keyboard reorder should *not* depend on the browser keeping DOM focus on the row.
-    // We therefore track selection by stable item id (UUID), and derive the current index
-    // from state.log whenever a key command is issued.
-    row.dataset.id = it.id || "";
-
-    const isSelected = (state.selectedLogId && it.id === state.selectedLogId)
-      || (!state.selectedLogId && idx === state.selectedLogIndex);
-
-    if(isSelected){
-      row.style.outline = "2px solid rgba(79,156,255,.55)";
-    }
-
-    const selectRow = () => {
-      state.selectedLogIndex = idx;
-      state.selectedLogId = it.id || null;
-      // Re-render so the outline follows selection.
-      renderLog();
-    };
-
-    // mousedown captures selection even if click is prevented by drag start on some browsers.
-    row.addEventListener("mousedown", selectRow);
-    row.addEventListener("click", selectRow);
-    row.addEventListener("focus", selectRow);
-
     el.appendChild(row);
   });
 
@@ -651,6 +574,171 @@ meta.appendChild(actions);
   if(state.flashIds && state.flashIds.size){
     state.flashIds = new Set();
   }
+}
+
+// Queue interaction handlers --------------------------------------------------
+// We install queue interaction once using event delegation. This makes behavior
+// robust even under frequent re-rendering from LIVE polling.
+function wireQueueInteractionHandlers(){
+  if(state._queueHandlersWired) return;
+  state._queueHandlersWired = true;
+
+  const logEl = qs("#logList");
+  let dragId = null;
+
+  const updateSelectionFromRow = (row) => {
+    if(!row) return;
+    const idx = parseInt(row.dataset.idx || "-1", 10);
+    const id = row.dataset.id || null;
+    if(!Number.isFinite(idx) || idx < 0) return;
+
+    state.selectedLogIndex = idx;
+    state.selectedLogId = id;
+
+    // Update DOM selection without re-rendering.
+    document.querySelectorAll("#logList .log-item.selected").forEach(x => x.classList.remove("selected"));
+    row.classList.add("selected");
+  };
+
+  // Row selection for keyboard reorder.
+  logEl.addEventListener("mousedown", (e) => {
+    const row = e.target.closest(".log-item");
+    if(row) updateSelectionFromRow(row);
+  }, true);
+  logEl.addEventListener("focusin", (e) => {
+    const row = e.target.closest(".log-item");
+    if(row) updateSelectionFromRow(row);
+  }, true);
+
+  // Delegated ▲/▼ click handling.
+  logEl.addEventListener("click", async (e) => {
+    const btn = e.target.closest("button[data-action]");
+    if(!btn) return;
+    if(btn.disabled) return;
+
+    const row = btn.closest(".log-item");
+    if(!row) return;
+
+    updateSelectionFromRow(row);
+
+    const action = btn.dataset.action;
+    const id = row.dataset.id || null;
+    const absIdx = parseInt(row.dataset.idx || "-1", 10);
+
+    // Never mutate playing row.
+    if(!id || !Number.isFinite(absIdx) || absIdx <= 0) return;
+
+    const upcoming = upcomingIdsFromState();
+    const upIdx = upcoming.indexOf(id);
+    if(upIdx === -1) return;
+
+    try{
+      if(action === "up"){
+        if(upIdx <= 0) return;
+        const newUpcoming = moveWithinUpcoming(upcoming, upIdx, upIdx - 1);
+        armUndoForReorder(); armFlashForReorder();
+        await postUpcomingReorder(newUpcoming);
+        commitUndoForReorder();
+        await fetchStatus();
+        toast("Moved up");
+        return;
+      }
+      if(action === "down"){
+        if(upIdx >= upcoming.length - 1) return;
+        const newUpcoming = moveWithinUpcoming(upcoming, upIdx, upIdx + 1);
+        armUndoForReorder(); armFlashForReorder();
+        await postUpcomingReorder(newUpcoming);
+        commitUndoForReorder();
+        await fetchStatus();
+        toast("Moved down");
+        return;
+      }
+      if(action === "remove"){
+        throw new Error("Remove not implemented on backend yet (queue/reorder only)");
+      }
+    }catch(err){
+      alert(err.message || String(err));
+    }
+  }, true);
+
+  // Delegated drag/drop handling (by id, not by index).
+  logEl.addEventListener("dragstart", (e) => {
+    const row = e.target.closest(".log-item");
+    if(!row) return;
+
+    const absIdx = parseInt(row.dataset.idx || "-1", 10);
+    const id = row.dataset.id || null;
+    if(!id || !Number.isFinite(absIdx) || absIdx <= 0) return;
+
+    dragId = id;
+    state.isDraggingLog = true;
+    row.classList.add("dragging");
+
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData("text/plain", id);
+  }, true);
+
+  logEl.addEventListener("dragend", (e) => {
+    const row = e.target.closest(".log-item");
+    if(row) row.classList.remove("dragging");
+    state.isDraggingLog = false;
+    dragId = null;
+
+    if(state.pendingRenderAfterDrag){
+      state.pendingRenderAfterDrag = false;
+      renderAll();
+    }
+  }, true);
+
+  logEl.addEventListener("dragover", (e) => {
+    const row = e.target.closest(".log-item");
+    if(!row) return;
+    const absIdx = parseInt(row.dataset.idx || "-1", 10);
+    if(!Number.isFinite(absIdx) || absIdx <= 0) return;
+
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+  }, true);
+
+  logEl.addEventListener("drop", async (e) => {
+    const row = e.target.closest(".log-item");
+    if(!row) return;
+
+    e.preventDefault();
+
+    const toId = row.dataset.id || null;
+    const toAbsIdx = parseInt(row.dataset.idx || "-1", 10);
+    const fromId = e.dataTransfer.getData("text/plain") || dragId;
+
+    if(!fromId || !toId) return;
+    if(!Number.isFinite(toAbsIdx) || toAbsIdx <= 0) return;
+    if(fromId === toId) return;
+
+    const upcoming = upcomingIdsFromState();
+    const fromUpcoming = upcoming.indexOf(fromId);
+    const toUpcoming = upcoming.indexOf(toId);
+    if(fromUpcoming === -1 || toUpcoming === -1) return;
+    if(fromUpcoming === toUpcoming) return;
+
+    try{
+      if(state.apiMode === "LIVE"){
+        const newUpcoming = moveWithinUpcoming(upcoming, fromUpcoming, toUpcoming);
+        armUndoForReorder(); armFlashForReorder();
+        await postUpcomingReorder(newUpcoming);
+        commitUndoForReorder();
+        await fetchStatus();
+      }else{
+        const fromAbs = fromUpcoming + 1;
+        const toAbs = toUpcoming + 1;
+        const it2 = state.log.splice(fromAbs, 1)[0];
+        state.log.splice(toAbs, 0, it2);
+        renderLog();
+      }
+      toast("Reordered");
+    }catch(err){
+      alert(err.message || String(err));
+    }
+  }, true);
 }
 
 function renderProducers(){
@@ -1045,66 +1133,10 @@ function wireUI(){
 
 
 function wireLogDelegatedHandlers(){
-  // Delegated click handling for queue editing buttons (▲/▼/✕).
-  // Why delegation?
-  // - The log is re-rendered often (polling + drag/drop updates).
-  // - Delegation ensures buttons remain functional even after re-render.
-  // - It also reliably handles clicks on nested elements (e.g., SVG icons).
-  if(state._logDelegationWired) return;
-  state._logDelegationWired = true;
-
-  const list = qs("#logList");
-  list.addEventListener("click", async (e) => {
-    const btn = e.target.closest("button[data-action]");
-    if(!btn) return;
-
-    const action = btn.dataset.action;
-    if(!action) return;
-
-    // Find the row and its UUID. We store it on the row dataset for safety.
-    const row = btn.closest(".log-item");
-    const id = row ? row.dataset.id : null;
-    if(!id) return;
-
-    // The backend only supports reordering upcoming items (log[1:]).
-    // Index 0 is the pinned currently-playing row and is intentionally immovable.
-    const upcoming = upcomingIdsFromState();
-    const idxUpcoming = upcoming.indexOf(id);
-    if(idxUpcoming < 0) return;
-
-    try{
-      if(action === "up"){
-        if(idxUpcoming <= 0) return;
-        const newUpcoming = moveWithinUpcoming(upcoming, idxUpcoming, idxUpcoming-1);
-        armUndoForReorder();
-        armFlashForReorder();
-        await postUpcomingReorder(newUpcoming);
-        commitUndoForReorder();
-        await fetchStatus();
-        toast("Moved up");
-        return;
-      }
-
-      if(action === "down"){
-        if(idxUpcoming >= upcoming.length - 1) return;
-        const newUpcoming = moveWithinUpcoming(upcoming, idxUpcoming, idxUpcoming+1);
-        armUndoForReorder();
-        armFlashForReorder();
-        await postUpcomingReorder(newUpcoming);
-        commitUndoForReorder();
-        await fetchStatus();
-        toast("Moved down");
-        return;
-      }
-
-      if(action === "remove"){
-        // Not implemented on backend yet; keep UX honest.
-        throw new Error("Remove not implemented on backend yet (queue/reorder only)");
-      }
-    }catch(err){
-      alert(err.message || String(err));
-    }
-  }, true);
+  // Back-compat shim: older releases called wireLogDelegatedHandlers().
+  // v0.1.37 installs all queue interaction (click + drag/drop + selection)
+  // via wireQueueInteractionHandlers().
+  wireQueueInteractionHandlers();
 }
 
 function simulateStatus(){
