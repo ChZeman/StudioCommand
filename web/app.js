@@ -440,6 +440,23 @@ function moveWithinUpcoming(upcoming, fromUpcomingIdx, toUpcomingIdx){
   return arr;
 }
 
+// Like moveWithinUpcoming(), but supports inserting *after* the target row.
+// This is required for a good drag-and-drop UX: users expect the drop location
+// to reflect whether they released above or below the target item.
+function moveWithinUpcomingRelative(upcoming, fromIdx, toIdx, insertAfter){
+  let target = toIdx + (insertAfter ? 1 : 0);
+
+  // When moving an item downwards and inserting after, removing the source first
+  // shifts the target index left by 1.
+  if(fromIdx < target) target -= 1;
+
+  // Allow appending at the end.
+  if(target < 0) target = 0;
+  if(target > upcoming.length) target = upcoming.length;
+
+  return moveWithinUpcoming(upcoming, fromIdx, target);
+}
+
 // Re-render helpers ----------------------------------------------------------
 // We keep rendering centralized so LIVE polling can safely trigger updates.
 // This also makes it easier to pause queue re-renders during drag gestures.
@@ -585,6 +602,17 @@ function wireQueueInteractionHandlers(){
 
   const logEl = qs("#logList");
   let dragId = null;
+  let dropIndicatorRow = null;
+  let dropIndicatorAfter = false;
+
+  const clearDropIndicator = () => {
+    if(dropIndicatorRow){
+      dropIndicatorRow.classList.remove("drop-before");
+      dropIndicatorRow.classList.remove("drop-after");
+    }
+    dropIndicatorRow = null;
+    dropIndicatorAfter = false;
+  };
 
   const updateSelectionFromRow = (row) => {
     if(!row) return;
@@ -684,6 +712,8 @@ function wireQueueInteractionHandlers(){
     state.isDraggingLog = false;
     dragId = null;
 
+    clearDropIndicator();
+
     if(state.pendingRenderAfterDrag){
       state.pendingRenderAfterDrag = false;
       renderAll();
@@ -698,6 +728,19 @@ function wireQueueInteractionHandlers(){
 
     e.preventDefault();
     e.dataTransfer.dropEffect = "move";
+
+    // Drop indicator: show whether the item would land before or after the
+    // hovered row. This matches common "playlist" UIs and reduces ambiguity.
+    const rect = row.getBoundingClientRect();
+    const after = e.clientY > (rect.top + rect.height / 2);
+
+    if(dropIndicatorRow !== row){
+      clearDropIndicator();
+      dropIndicatorRow = row;
+    }
+    dropIndicatorAfter = after;
+    row.classList.toggle("drop-after", after);
+    row.classList.toggle("drop-before", !after);
   }, true);
 
   logEl.addEventListener("drop", async (e) => {
@@ -705,6 +748,15 @@ function wireQueueInteractionHandlers(){
     if(!row) return;
 
     e.preventDefault();
+
+    // Snapshot the indicator before we clear it.
+    const insertAfter = (dropIndicatorRow === row) ? dropIndicatorAfter : (() => {
+      // Fallback if the indicator wasn't set (e.g. fast drop).
+      const rect = row.getBoundingClientRect();
+      return e.clientY > (rect.top + rect.height / 2);
+    })();
+
+    clearDropIndicator();
 
     const toId = row.dataset.id || null;
     const toAbsIdx = parseInt(row.dataset.idx || "-1", 10);
@@ -722,14 +774,16 @@ function wireQueueInteractionHandlers(){
 
     try{
       if(state.apiMode === "LIVE"){
-        const newUpcoming = moveWithinUpcoming(upcoming, fromUpcoming, toUpcoming);
+        const newUpcoming = moveWithinUpcomingRelative(upcoming, fromUpcoming, toUpcoming, insertAfter);
         armUndoForReorder(); armFlashForReorder();
         await postUpcomingReorder(newUpcoming);
         commitUndoForReorder();
         await fetchStatus();
       }else{
         const fromAbs = fromUpcoming + 1;
-        const toAbs = toUpcoming + 1;
+        // In DEMO mode we still respect before/after to keep behavior consistent
+        // with LIVE mode (the operator should not have to think about modes).
+        const toAbs = toUpcoming + 1 + (insertAfter ? 1 : 0);
         const it2 = state.log.splice(fromAbs, 1)[0];
         state.log.splice(toAbs, 0, it2);
         renderLog();
@@ -1134,7 +1188,7 @@ function wireUI(){
 
 function wireLogDelegatedHandlers(){
   // Back-compat shim: older releases called wireLogDelegatedHandlers().
-  // v0.1.37 installs all queue interaction (click + drag/drop + selection)
+  // v0.1.38 installs all queue interaction (click + drag/drop + selection)
   // via wireQueueInteractionHandlers().
   wireQueueInteractionHandlers();
 }

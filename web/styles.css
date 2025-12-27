@@ -116,6 +116,7 @@ body{
   display:flex;
   gap:10px;
   align-items:flex-start;
+  position: relative;
 }
 
 .log-item.selected{ outline:2px solid rgba(79,156,255,.55); }
@@ -136,6 +137,12 @@ body{
    We keep it subtle: the UI is meant to be "broadcast calm" even while editing. */
 .log-item[draggable="true"]{ cursor: grab; }
 .log-item.dragging{ opacity: .55; cursor: grabbing; }
+
+/* Drop indicator (v0.1.38)
+   We show a thin insertion line either above or below the hovered row so the
+   operator can see the exact landing slot before releasing the mouse. */
+.log-item.drop-before{ box-shadow: inset 0 2px 0 rgba(120,200,255,.75); }
+.log-item.drop-after{ box-shadow: inset 0 -2px 0 rgba(120,200,255,.75); }
 .log-stripe{width:6px; border-radius:999px; margin-top:2px}
 .log-main{flex:1; min-width:0}
 .log-top{display:flex; gap:8px; align-items:center}

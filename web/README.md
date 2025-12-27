@@ -36,6 +36,20 @@ The UI calls:
 The payload is a full, ordered list of **upcoming** item IDs (strict by design). This makes the API easy to reason about
 and avoids ambiguous partial updates.
 
+## Drop indicator (insertion line)
+
+When dragging a row, the UI shows a thin **insertion line** either **above** or
+**below** the hovered row. This removes ambiguity about where the item will land
+before the mouse is released.
+
+Why this matters:
+
+- Without an indicator, operators must *infer* the landing slot (hard in long lists).
+- The indicator makes "move before" vs "move after" explicit, matching common
+  playlist editors.
+- The UI computes before/after by comparing the cursor Y position with the
+  hovered row's vertical center.
+
 ## Run locally
 ```bash
 python3 -m http.server 8080
