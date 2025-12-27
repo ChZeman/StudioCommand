@@ -40,6 +40,7 @@ VERSION=""           # e.g. v0.1.0
 DOMAIN=""            # required
 EMAIL=""             # optional; enables Let's Encrypt
 NONINTERACTIVE="false"
+NO_DEPS="false"        # set true to skip installing OS dependencies (e.g. ffmpeg)
 
 
 detect_default_domain() {
@@ -64,7 +65,10 @@ usage() {
 StudioCommand online installer
 
 Usage:
-  sudo $0 --domain <host> [--email <email>] [--version <tag>] [--noninteractive]
+  sudo $0 --domain <host> [--email <email>] [--version <tag>] [--noninteractive] [--no-deps]
+
+Options:
+  --no-deps        Skip installing OS dependencies (ffmpeg). You must install them yourself.
 
 Examples:
   sudo $0 --domain studiocommand.example.org --email admin@example.org
@@ -78,6 +82,7 @@ while [[ $# -gt 0 ]]; do
     --domain) DOMAIN="$2"; shift 2;;
     --email) EMAIL="$2"; shift 2;;
     --noninteractive) NONINTERACTIVE="true"; shift 1;;
+    --no-deps) NO_DEPS="true"; shift 1;;
     -h|--help) usage; exit 0;;
     *) echo "Unknown arg: $1"; usage; exit 1;;
   esac
@@ -132,6 +137,59 @@ if ! command -v curl >/dev/null 2>&1; then
   apt-get install -y curl
 fi
 
+# Ensure streaming dependencies (ffmpeg) exist. Debian 13+ uses apt.
+ensure_streaming_deps() {
+  if [[ "${NO_DEPS}" == "true" ]]; then
+    echo "[*] Skipping dependency installation (--no-deps)."
+    return 0
+  fi
+
+  if command -v ffmpeg >/dev/null 2>&1; then
+    echo "[*] Dependency ok: ffmpeg found."
+    return 0
+  fi
+
+  echo "[*] ffmpeg not found; installing (required for Icecast MP3/AAC streaming)"
+  if command -v apt-get >/dev/null 2>&1; then
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update
+    apt-get install -y ffmpeg
+  else
+    echo "ERROR: ffmpeg not found and apt-get is not available. Please install ffmpeg manually."
+    return 1
+  fi
+
+  if ! command -v ffmpeg >/dev/null 2>&1; then
+    echo "ERROR: ffmpeg install did not succeed."
+    return 1
+  fi
+  echo "[*] Dependency installed: ffmpeg"
+}
+
+post_install_check() {
+  echo
+  echo "[*] Post-install dependency check"
+  if command -v ffmpeg >/dev/null 2>&1; then
+    local ff
+    ff="$(command -v ffmpeg)"
+    echo "  - ffmpeg: FOUND (${ff})"
+    # Encoder checks (best-effort; do not fail install)
+    if ffmpeg -hide_banner -encoders 2>/dev/null | grep -qE '^[[:space:]]*A[[:space:]]+libmp3lame[[:space:]]'; then
+      echo "  - MP3 encoder (libmp3lame): AVAILABLE"
+    else
+      echo "  - MP3 encoder (libmp3lame): NOT FOUND (streaming MP3 may not work)"
+    fi
+    if ffmpeg -hide_banner -encoders 2>/dev/null | grep -qE '^[[:space:]]*A[[:space:]]+aac[[:space:]]'; then
+      echo "  - AAC encoder (aac): AVAILABLE"
+    else
+      echo "  - AAC encoder (aac): NOT FOUND (streaming AAC may not work)"
+    fi
+  else
+    echo "  - ffmpeg: MISSING"
+    echo "  - Streaming will not function until ffmpeg is installed."
+  fi
+}
+
 # Map CPU architecture to release tarball naming.
 ARCH_RAW="$(uname -m)"
 case "${ARCH_RAW}" in
@@ -185,6 +243,8 @@ fi
 
 echo
 echo "StudioCommand install plan:"
+ensure_streaming_deps
+
 echo "  - Version:       ${VERSION} (normalized: ${VERSION_NO_V})"
 echo "  - Architecture:  ${ARCH}"
 echo "  - Public URL:    https://${DOMAIN}:${PUBLIC_HTTPS_PORT}"
@@ -240,5 +300,6 @@ else
   "${INSTALL_SH_PATH}" --version "${VERSION_NO_V}" --tar "${TARBALL_PATH}" --domain "${DOMAIN}"
 fi
 
+post_install_check
 echo
 echo "[✓] Done. Open: https://${DOMAIN}:${PUBLIC_HTTPS_PORT}"

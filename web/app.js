@@ -10,7 +10,7 @@ const TARGET_LOG_LEN = 12;
 
 // NOTE: UI_VERSION is purely informational (tooltip on the header).
 // The authoritative running version is exposed by the backend at /api/v1/status.
-const UI_VERSION = "0.1.35";
+const UI_VERSION = "0.1.39";
 
 const state = {
   role: "operator",
@@ -63,6 +63,15 @@ const state = {
   undoPendingUpcoming: null, // array of UUID strings captured before a reorder request
   undoUpcoming: null,        // array of UUID strings available for Ctrl/Cmd+Z
   undoAvailable: false,
+
+  // Streaming output (Icecast) config + status (LIVE mode)
+  output: {
+    config: null,
+    status: null,
+    lastAt: 0,
+    lastError: null,
+    formDirty: false,
+  },
 };
 
 function pad(n){ return String(n).padStart(2,'0');}
@@ -291,6 +300,10 @@ if(state.flashArmed && Array.isArray(state.flashPrevOrder) && state.flashPrevOrd
 
     setApiBadge("LIVE");
 
+    // Fetch streaming output status in LIVE mode.
+    // We keep it separate from /api/v1/status so output can evolve independently.
+    fetchOutput().catch(()=>{});
+
     // Re-render immediately unless the operator is currently dragging a log row.
     // (See state.isDraggingLog for rationale.)
     if(state.isDraggingLog){
@@ -322,7 +335,24 @@ if(state.flashArmed && Array.isArray(state.flashPrevOrder) && state.flashPrevOrd
       renderAll();
     }
 }
+	// end fetchStatus
 }
+
+async function fetchOutput(){
+  try{
+    const r = await fetch("/api/v1/output", { cache: "no-store" });
+    if(!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    state.output.config = data.config || null;
+    state.output.status = data.status || null;
+    state.output.lastAt = Date.now();
+    state.output.lastError = null;
+  }catch(e){
+    state.output.lastError = (e && e.message) ? e.message : String(e);
+  }
+  renderStreaming();
+}
+
 
 
 
@@ -1238,6 +1268,142 @@ function simulateStatus(){
   renderProducers();
 }
 
+function renderStreaming(){
+  const st = state.output.status;
+  const cfg = state.output.config;
+
+  // DEMO fallback
+  if(state.apiMode !== "LIVE" || !st){
+    setBadge("#streamBadge", "badge-ok", "STREAM OK");
+    const ms = qs("#mStream"); if(ms) ms.textContent = "Connected";
+    const mc = qs("#mCodec"); if(mc) mc.textContent = "—";
+    const mt = qs("#mMeta"); if(mt) mt.textContent = "OK";
+    return;
+  }
+
+  // Badge + monitors card
+  const stateTxt = (st.state || "stopped").toLowerCase();
+  if(stateTxt === "connected"){
+    setBadge("#streamBadge", "badge-ok", "STREAM OK");
+  }else if(stateTxt === "starting"){
+    setBadge("#streamBadge", "badge-warn", "STREAM START");
+  }else if(stateTxt === "error"){
+    setBadge("#streamBadge", "badge-bad", "STREAM ERR");
+  }else{
+    setBadge("#streamBadge", "badge-warn", "STREAM OFF");
+  }
+
+  const ms = qs("#mStream");
+  if(ms){
+    ms.textContent = stateTxt === "connected" ? "Connected" : stateTxt;
+    ms.className = (stateTxt === "connected") ? "ok" : (stateTxt === "error" ? "bad" : "warn");
+  }
+
+  const mc = qs("#mCodec");
+  if(mc){
+    const c = (st.codec || cfg?.codec || "—").toUpperCase();
+    const br = st.bitrate_kbps || cfg?.bitrate_kbps;
+    mc.textContent = br ? `${c} ${br}k` : c;
+  }
+
+  const mt = qs("#mMeta");
+  if(mt){
+    mt.textContent = st.last_error ? "ERR" : "OK";
+  }
+
+  // Config form (only sync into fields when not dirty)
+  if(cfg && !state.output.formDirty){
+    const setVal = (id, v) => { const el = qs(id); if(el && document.activeElement !== el) el.value = (v ?? ""); };
+    setVal("#outHost", cfg.host);
+    setVal("#outPort", String(cfg.port));
+    setVal("#outMount", cfg.mount);
+    setVal("#outUser", cfg.username);
+    const codecEl = qs("#outCodec"); if(codecEl) codecEl.value = cfg.codec || "mp3";
+    setVal("#outBitrate", String(cfg.bitrate_kbps || 128));
+    const en = qs("#outEnabled"); if(en) en.checked = !!cfg.enabled;
+    // Never auto-fill password.
+  }
+
+  const stEl = qs("#outStatusText");
+  if(stEl){
+    const up = typeof st.uptime_sec === "number" ? `${st.uptime_sec}s` : "—";
+    const extra = st.last_error ? ` • ${st.last_error}` : "";
+    stEl.textContent = `Status: ${stateTxt} • uptime ${up}${extra}`;
+  }
+
+  const urlEl = qs("#outListenerUrl");
+  if(urlEl && cfg){
+    urlEl.textContent = `http://${cfg.host}:${cfg.port}${cfg.mount}`;
+  }
+}
+
+function wireStreamingControls(){
+  // Mark form dirty on edit so we don't overwrite while typing.
+  ["#outHost","#outPort","#outMount","#outUser","#outPass","#outCodec","#outBitrate","#outEnabled"].forEach(id => {
+    const el = qs(id);
+    if(!el) return;
+    el.addEventListener("input", ()=>{ state.output.formDirty = true; });
+    el.addEventListener("change", ()=>{ state.output.formDirty = true; });
+  });
+
+  const btnSave = qs("#btnOutSave");
+  const btnStart = qs("#btnOutStart");
+  const btnStop = qs("#btnOutStop");
+
+  async function saveConfig(){
+    const cfg0 = state.output.config || {};
+    const host = (qs("#outHost")?.value || "").trim();
+    const port = parseInt((qs("#outPort")?.value || "").trim(), 10) || 0;
+    const mount = (qs("#outMount")?.value || "").trim();
+    const username = (qs("#outUser")?.value || "").trim();
+    const passIn = (qs("#outPass")?.value || "");
+    const codec = qs("#outCodec")?.value || "mp3";
+    const bitrate_kbps = parseInt((qs("#outBitrate")?.value || "").trim(), 10) || 128;
+    const enabled = !!qs("#outEnabled")?.checked;
+
+    const cfg = {
+      type: cfg0.type || "icecast",
+      host: host || cfg0.host || "seahorse.juststreamwith.us",
+      port: port || cfg0.port || 8006,
+      mount: mount || cfg0.mount || "/studiocommand",
+      username: username || cfg0.username || "source",
+      password: passIn.length ? passIn : (cfg0.password || ""),
+      codec,
+      bitrate_kbps,
+      enabled,
+      name: cfg0.name || "StudioCommand",
+      genre: cfg0.genre || null,
+      description: cfg0.description || null,
+      public: (cfg0.public === undefined) ? false : cfg0.public,
+    };
+
+    await postAction("/api/v1/output/config", cfg);
+    state.output.formDirty = false;
+    // Clear password field after save for safety.
+    const passEl = qs("#outPass"); if(passEl) passEl.value = "";
+    await fetchOutput();
+    toast("Streaming config saved");
+  }
+
+  async function run(btn, fn){
+    if(!btn) return;
+    const prev = btn.disabled;
+    btn.disabled = true;
+    try{
+      await fn();
+    }catch(e){
+      console.error(e);
+      alert(`Streaming action failed: ${e && e.message ? e.message : e}`);
+    }finally{
+      btn.disabled = prev;
+    }
+  }
+
+  if(btnSave) btnSave.addEventListener("click", ()=> run(btnSave, saveConfig));
+  if(btnStart) btnStart.addEventListener("click", ()=> run(btnStart, async()=>{ await saveConfig(); await postAction("/api/v1/output/start"); await fetchOutput(); }));
+  if(btnStop) btnStop.addEventListener("click", ()=> run(btnStop, async()=>{ await postAction("/api/v1/output/stop"); await fetchOutput(); }));
+}
+
 
 function wireTransportControls(){
   const btnSkip = qs("#btnSkip");
@@ -1270,6 +1436,7 @@ initData();
 setHeaderVersion();
 setApiBadge("DEMO");
 wireTransportControls();
+wireStreamingControls();
 fetchStatus();
 setInterval(fetchStatus, 1000);
 renderApiBadge();

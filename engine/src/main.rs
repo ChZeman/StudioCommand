@@ -12,7 +12,7 @@ use std::{net::SocketAddr, sync::Arc};
 
 use axum::{
     extract::State,
-            routing::{get, post},
+    routing::{get, post},
     Json, Router,
 };
 use serde::{Serialize, Deserialize};
@@ -20,12 +20,69 @@ use uuid::Uuid;
 use rusqlite::{Connection, params};
 use sysinfo::System;
 use tracing::{info, warn};
+use tokio::io::AsyncWriteExt;
+use tokio::process::Command;
 
 #[derive(Clone)]
 struct AppState {
     version: String,
     sys: Arc<tokio::sync::Mutex<System>>,
     playout: Arc<tokio::sync::RwLock<PlayoutState>>,
+    output: Arc<tokio::sync::Mutex<OutputRuntime>>,
+}
+
+// --- Streaming output (Icecast) -----------------------------------------
+
+#[derive(Clone, Serialize, Deserialize, Default)]
+struct StreamOutputConfig {
+    r#type: String,      // "icecast" (future: "shoutcast")
+    host: String,
+    port: u16,
+    mount: String,
+    username: String,
+    password: String,
+    codec: String,       // "mp3" | "aac"
+    bitrate_kbps: u16,   // 64..320
+    enabled: bool,
+    name: Option<String>,
+    genre: Option<String>,
+    description: Option<String>,
+    public: Option<bool>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct StreamOutputStatus {
+    state: String, // stopped | starting | connected | error
+    uptime_sec: u64,
+    last_error: Option<String>,
+    codec: Option<String>,
+    bitrate_kbps: Option<u16>,
+}
+
+struct OutputRuntime {
+    config: StreamOutputConfig,
+    status: StreamOutputStatus,
+    ffmpeg_child: Option<tokio::process::Child>,
+    writer_task: Option<tokio::task::JoinHandle<()>>,
+    started_at: Option<std::time::Instant>,
+}
+
+impl OutputRuntime {
+    fn new(config: StreamOutputConfig) -> Self {
+        Self {
+            status: StreamOutputStatus {
+                state: "stopped".into(),
+                uptime_sec: 0,
+                last_error: None,
+                codec: None,
+                bitrate_kbps: None,
+            },
+            config,
+            ffmpeg_child: None,
+            writer_task: None,
+            started_at: None,
+        }
+    }
 }
 
 // --- Persistence (SQLite) -------------------------------------------------
@@ -68,6 +125,23 @@ fn db_init(conn: &Connection) -> rusqlite::Result<()> {
         );
 
         CREATE INDEX IF NOT EXISTS idx_queue_items_position ON queue_items(position);
+
+        CREATE TABLE IF NOT EXISTS stream_output_config (
+            id            INTEGER PRIMARY KEY CHECK (id = 1),
+            type          TEXT NOT NULL,
+            host          TEXT NOT NULL,
+            port          INTEGER NOT NULL,
+            mount         TEXT NOT NULL,
+            username      TEXT NOT NULL,
+            password      TEXT NOT NULL,
+            codec         TEXT NOT NULL,
+            bitrate_kbps  INTEGER NOT NULL,
+            enabled       INTEGER NOT NULL,
+            name          TEXT,
+            genre         TEXT,
+            description   TEXT,
+            public        INTEGER
+        );
         "#,
     )?;
     Ok(())
@@ -194,6 +268,118 @@ async fn load_queue_from_db_or_demo() -> Vec<LogItem> {
     }
 }
 
+fn default_output_config() -> StreamOutputConfig {
+    StreamOutputConfig {
+        r#type: "icecast".into(),
+        host: "seahorse.juststreamwith.us".into(),
+        port: 8006,
+        mount: "/studiocommand".into(),
+        username: "source".into(),
+        password: "".into(),
+        codec: "mp3".into(),
+        bitrate_kbps: 128,
+        enabled: false,
+        name: Some("StudioCommand".into()),
+        genre: None,
+        description: None,
+        public: Some(false),
+    }
+}
+
+fn db_load_output_config(conn: &Connection) -> anyhow::Result<StreamOutputConfig> {
+    db_init(conn)?;
+
+    let row_opt = conn.query_row(
+        "SELECT type, host, port, mount, username, password, codec, bitrate_kbps, enabled, name, genre, description, public FROM stream_output_config WHERE id = 1",
+        [],
+        |row| {
+            Ok(StreamOutputConfig {
+                r#type: row.get::<_, String>(0)?,
+                host: row.get::<_, String>(1)?,
+                port: row.get::<_, i64>(2)? as u16,
+                mount: row.get::<_, String>(3)?,
+                username: row.get::<_, String>(4)?,
+                password: row.get::<_, String>(5)?,
+                codec: row.get::<_, String>(6)?,
+                bitrate_kbps: row.get::<_, i64>(7)? as u16,
+                enabled: row.get::<_, i64>(8)? != 0,
+                name: row.get::<_, Option<String>>(9)?,
+                genre: row.get::<_, Option<String>>(10)?,
+                description: row.get::<_, Option<String>>(11)?,
+                public: match row.get::<_, Option<i64>>(12)? {
+                    Some(v) => Some(v != 0),
+                    None => None,
+                },
+            })
+        },
+    );
+
+    match row_opt {
+        Ok(cfg) => Ok(cfg),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(default_output_config()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+fn db_save_output_config(conn: &mut Connection, cfg: &StreamOutputConfig) -> anyhow::Result<()> {
+    db_init(conn)?;
+    conn.execute(
+        "INSERT INTO stream_output_config (id, type, host, port, mount, username, password, codec, bitrate_kbps, enabled, name, genre, description, public)
+         VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+         ON CONFLICT(id) DO UPDATE SET
+           type=excluded.type,
+           host=excluded.host,
+           port=excluded.port,
+           mount=excluded.mount,
+           username=excluded.username,
+           password=excluded.password,
+           codec=excluded.codec,
+           bitrate_kbps=excluded.bitrate_kbps,
+           enabled=excluded.enabled,
+           name=excluded.name,
+           genre=excluded.genre,
+           description=excluded.description,
+           public=excluded.public",
+        params![
+            cfg.r#type,
+            cfg.host,
+            cfg.port as i64,
+            cfg.mount,
+            cfg.username,
+            cfg.password,
+            cfg.codec,
+            cfg.bitrate_kbps as i64,
+            if cfg.enabled { 1 } else { 0 },
+            cfg.name,
+            cfg.genre,
+            cfg.description,
+            cfg.public.map(|v| if v { 1 } else { 0 }),
+        ],
+    )?;
+    Ok(())
+}
+
+async fn load_output_config_from_db_or_default() -> StreamOutputConfig {
+    let path = db_path();
+    let res = tokio::task::spawn_blocking(move || -> anyhow::Result<StreamOutputConfig> {
+        let conn = Connection::open(path)?;
+        db_load_output_config(&conn)
+    })
+    .await;
+
+    match res {
+        Ok(Ok(cfg)) => cfg,
+        Ok(Err(e)) => {
+            tracing::warn!("failed to load stream output config, using defaults: {e}");
+            default_output_config()
+        }
+        Err(e) => {
+            tracing::warn!("failed to join stream output load task, using defaults: {e}");
+            default_output_config()
+        }
+    }
+}
+
 async fn persist_queue(log: Vec<LogItem>) {
     let path = db_path();
     let _ = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
@@ -275,6 +461,9 @@ async fn main() -> anyhow::Result<()> {
 // In later versions this becomes the real automation engine state.
 let log = load_queue_from_db_or_demo().await;
 
+// Load streaming output config (Icecast) from SQLite (or defaults).
+let output_cfg = load_output_config_from_db_or_default().await;
+
 // Ensure the current queue is persisted so restarts are deterministic.
 // This is cheap (single transaction) and makes initial installs predictable.
 persist_queue(log.clone()).await;
@@ -290,7 +479,20 @@ let state = AppState {
     version: version.clone(),
     sys: Arc::new(tokio::sync::Mutex::new(sys)),
     playout: Arc::new(tokio::sync::RwLock::new(playout)),
+    output: Arc::new(tokio::sync::Mutex::new(OutputRuntime::new(output_cfg))),
 };
+
+// Optional: auto-start streaming output if config says enabled.
+// (If ffmpeg isn't installed or creds are wrong, status will surface the error.)
+{
+    let out = state.output.clone();
+    let enabled = out.lock().await.config.enabled;
+    if enabled {
+        tokio::spawn(async move {
+            let _ = output_start_internal(out).await;
+        });
+    }
+}
 
 // Background tick: advances the demo queue once per second.
 tokio::spawn(playout_tick(state.playout.clone()));
@@ -327,6 +529,10 @@ fn build_router(state: AppState) -> Router {
         .route("/api/v1/status", get(status))
         .route("/api/v1/ping", get(ping))
         .route("/api/v1/system/info", get(system_info))
+        .route("/api/v1/output", get(api_output_get))
+        .route("/api/v1/output/config", post(api_output_set_config))
+        .route("/api/v1/output/start", post(api_output_start))
+        .route("/api/v1/output/stop", post(api_output_stop))
         .route("/admin/api/v1/update/status", get(update_status))
         .with_state(state)
 }
@@ -508,6 +714,237 @@ fn read_temp_c() -> anyhow::Result<Option<f32>> {
         }
     }
     Ok(None)
+}
+
+// --- Output API (Icecast) -------------------------------------------------
+
+#[derive(Serialize)]
+struct OutputGetResponse {
+    config: StreamOutputConfig,
+    status: StreamOutputStatus,
+}
+
+async fn api_output_get(State(state): State<AppState>) -> Json<OutputGetResponse> {
+    let mut o = state.output.lock().await;
+
+    // If ffmpeg exited since last poll, update status.
+    if let Some(child) = o.ffmpeg_child.as_mut() {
+        match child.try_wait() {
+            Ok(Some(es)) => {
+                o.ffmpeg_child = None;
+                o.started_at = None;
+                o.status.uptime_sec = 0;
+                if es.success() {
+                    o.status.state = "stopped".into();
+                } else {
+                    o.status.state = "error".into();
+                    o.status.last_error = Some(format!("ffmpeg exited: {es}"));
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                o.status.state = "error".into();
+                o.status.last_error = Some(format!("ffmpeg try_wait error: {e}"));
+            }
+        }
+    }
+    // Refresh uptime
+    if let Some(started) = o.started_at {
+        o.status.uptime_sec = started.elapsed().as_secs();
+    } else {
+        o.status.uptime_sec = 0;
+    }
+    Json(OutputGetResponse {
+        config: o.config.clone(),
+        status: o.status.clone(),
+    })
+}
+
+async fn api_output_set_config(
+    State(state): State<AppState>,
+    Json(mut cfg): Json<StreamOutputConfig>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    // Normalize a few inputs for operator convenience.
+    if !cfg.mount.starts_with('/') {
+        cfg.mount = format!("/{}", cfg.mount);
+    }
+    if cfg.codec != "mp3" && cfg.codec != "aac" {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    if cfg.bitrate_kbps < 32 || cfg.bitrate_kbps > 320 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    // Persist to SQLite.
+    let path = db_path();
+    let cfg_clone = cfg.clone();
+    tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+        let mut conn = Connection::open(path)?;
+        db_save_output_config(&mut conn, &cfg_clone)?;
+        Ok(())
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // Update in-memory config.
+    let mut o = state.output.lock().await;
+    o.config = cfg;
+
+    Ok(Json(json!({"ok": true})))
+}
+
+async fn api_output_start(State(state): State<AppState>) -> Result<Json<serde_json::Value>, StatusCode> {
+    output_start_internal(state.output.clone()).await?;
+    Ok(Json(json!({"ok": true})))
+}
+
+async fn api_output_stop(State(state): State<AppState>) -> Result<Json<serde_json::Value>, StatusCode> {
+    output_stop_internal(state.output.clone()).await;
+    Ok(Json(json!({"ok": true})))
+}
+
+async fn output_start_internal(output: Arc<tokio::sync::Mutex<OutputRuntime>>) -> Result<(), StatusCode> {
+    let mut o = output.lock().await;
+    if o.ffmpeg_child.is_some() {
+        return Err(StatusCode::CONFLICT);
+    }
+
+    // Basic validation
+    if o.config.password.trim().is_empty() {
+        o.status.state = "error".into();
+        o.status.last_error = Some("Icecast password is empty".into());
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    // Spawn ffmpeg and a simple audio generator to prove end-to-end streaming.
+    let (mut child, stdin) = spawn_ffmpeg_icecast(&o.config).await.map_err(|e| {
+        o.status.state = "error".into();
+        o.status.last_error = Some(e.to_string());
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    o.status.state = "starting".into();
+    o.status.last_error = None;
+    o.status.codec = Some(o.config.codec.clone());
+    o.status.bitrate_kbps = Some(o.config.bitrate_kbps);
+    o.started_at = Some(std::time::Instant::now());
+
+    let output_for_writer = output.clone();
+    let writer_task = tokio::spawn(async move {
+        if let Err(e) = writer_sine_wave(stdin).await {
+            let mut o = output_for_writer.lock().await;
+            o.status.state = "error".into();
+            o.status.last_error = Some(format!("audio writer: {e}"));
+        }
+    });
+
+    // Put child + task into runtime.
+    o.ffmpeg_child = Some(child);
+    o.writer_task = Some(writer_task);
+
+    // Optimistically mark connected after a short grace period if ffmpeg is still alive.
+    drop(o);
+    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+    let mut o = output.lock().await;
+    if o.ffmpeg_child.is_some() && o.status.state == "starting" {
+        o.status.state = "connected".into();
+    }
+
+    Ok(())
+}
+
+async fn output_stop_internal(output: Arc<tokio::sync::Mutex<OutputRuntime>>) {
+    let mut o = output.lock().await;
+
+    if let Some(mut child) = o.ffmpeg_child.take() {
+        // Try graceful shutdown first.
+        let _ = child.kill().await;
+    }
+
+    if let Some(task) = o.writer_task.take() {
+        task.abort();
+    }
+
+    o.started_at = None;
+    o.status.uptime_sec = 0;
+    o.status.state = "stopped".into();
+}
+
+async fn spawn_ffmpeg_icecast(cfg: &StreamOutputConfig) -> anyhow::Result<(tokio::process::Child, tokio::process::ChildStdin)> {
+    let ffmpeg = std::env::var("STUDIOCOMMAND_FFMPEG").unwrap_or_else(|_| "ffmpeg".to_string());
+
+    // Important: never log the password.
+    // Note: Icecast source passwords are usually ASCII and safe to embed.
+    // If you need full URL-encoding later, we can add it, but we avoid pulling
+    // in extra deps for the MVP.
+    let url = format!(
+        "icecast://{}:{}@{}:{}{}",
+        cfg.username,
+        cfg.password,
+        cfg.host,
+        cfg.port,
+        cfg.mount
+    );
+
+    let mut cmd = Command::new(ffmpeg);
+    cmd.arg("-hide_banner");
+    cmd.arg("-loglevel").arg("error");
+    cmd.arg("-re");
+    cmd.arg("-f").arg("s16le");
+    cmd.arg("-ar").arg("44100");
+    cmd.arg("-ac").arg("2");
+    cmd.arg("-i").arg("pipe:0");
+
+    match cfg.codec.as_str() {
+        "mp3" => {
+            cmd.arg("-c:a").arg("libmp3lame");
+            cmd.arg("-b:a").arg(format!("{}k", cfg.bitrate_kbps));
+            cmd.arg("-content_type").arg("audio/mpeg");
+            cmd.arg("-f").arg("mp3");
+        }
+        "aac" => {
+            cmd.arg("-c:a").arg("aac");
+            cmd.arg("-b:a").arg(format!("{}k", cfg.bitrate_kbps));
+            cmd.arg("-content_type").arg("audio/aac");
+            cmd.arg("-f").arg("adts");
+        }
+        _ => anyhow::bail!("unsupported codec: {}", cfg.codec),
+    }
+
+    cmd.arg(url);
+    cmd.stdin(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+
+    let mut child = cmd.spawn()?;
+    let stdin = child.stdin.take().ok_or_else(|| anyhow::anyhow!("ffmpeg stdin unavailable"))?;
+    Ok((child, stdin))
+}
+
+async fn writer_sine_wave(mut stdin: tokio::process::ChildStdin) -> anyhow::Result<()> {
+    // 1k frames per chunk (~23ms @ 44.1kHz)
+    const SR: f32 = 44100.0;
+    const FRAMES: usize = 1024;
+    const FREQ: f32 = 440.0;
+    let mut phase: f32 = 0.0;
+    let step = (std::f32::consts::TAU * FREQ) / SR;
+
+    let mut interval = tokio::time::interval(std::time::Duration::from_millis(20));
+    loop {
+        interval.tick().await;
+        let mut buf = Vec::with_capacity(FRAMES * 2 * 2);
+        for _ in 0..FRAMES {
+            let v = (phase.sin() * 0.12 * i16::MAX as f32) as i16;
+            phase += step;
+            if phase > std::f32::consts::TAU {
+                phase -= std::f32::consts::TAU;
+            }
+            // stereo interleaved s16le
+            buf.extend_from_slice(&v.to_le_bytes());
+            buf.extend_from_slice(&v.to_le_bytes());
+        }
+        stdin.write_all(&buf).await?;
+    }
 }
 
 #[derive(Serialize)]

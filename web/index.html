@@ -199,6 +199,56 @@
             <div class="mon-row"><span>Mode</span><span id="mPriority">Normal (A+V)</span></div>
           </div>
         </div>
+
+        <div class="mon-config">
+          <div class="mon-title">Streaming Output (Icecast)</div>
+          <div class="form-grid">
+            <label class="field">
+              <span>Host</span>
+              <input class="input" id="outHost" placeholder="seahorse.juststreamwith.us" />
+            </label>
+            <label class="field">
+              <span>Port</span>
+              <input class="input" id="outPort" placeholder="8006" />
+            </label>
+            <label class="field">
+              <span>Mount</span>
+              <input class="input" id="outMount" placeholder="/studiocommand" />
+            </label>
+            <label class="field">
+              <span>Username</span>
+              <input class="input" id="outUser" placeholder="source" />
+            </label>
+            <label class="field">
+              <span>Password</span>
+              <input class="input" id="outPass" type="password" placeholder="••••••••" />
+            </label>
+            <label class="field">
+              <span>Codec</span>
+              <select class="select" id="outCodec">
+                <option value="mp3">MP3</option>
+                <option value="aac">AAC</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>Bitrate (kbps)</span>
+              <input class="input" id="outBitrate" placeholder="128" />
+            </label>
+            <label class="field field-check">
+              <span>Auto-start on boot</span>
+              <input type="checkbox" id="outEnabled" />
+            </label>
+          </div>
+          <div class="form-actions">
+            <button class="btn btn-secondary" id="btnOutSave">Save</button>
+            <button class="btn btn-primary" id="btnOutStart">Start</button>
+            <button class="btn btn-danger" id="btnOutStop">Stop</button>
+            <div class="form-status">
+              <div id="outStatusText">Status: —</div>
+              <div class="mono">Listener URL: <span id="outListenerUrl">—</span></div>
+            </div>
+          </div>
+        </div>
         <div class="alarms">
           <div class="mon-title">Alarms</div>
           <div class="alarm ok">No active alarms</div>
