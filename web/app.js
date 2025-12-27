@@ -10,7 +10,7 @@ const TARGET_LOG_LEN = 12;
 
 // NOTE: UI_VERSION is purely informational (tooltip on the header).
 // The authoritative running version is exposed by the backend at /api/v1/status.
-const UI_VERSION = "0.1.33";
+const UI_VERSION = "0.1.35";
 
 const state = {
   role: "operator",
@@ -466,6 +466,7 @@ function renderLog(){
     // We keep this even for the pinned playing row (idx=0) so the handler can
     // quickly reject unsafe moves without needing to infer indices from DOM.
     row.dataset.idx = String(idx);
+    row.dataset.id = it.id || "";
 
     // If this item was part of the last reorder operation, briefly flash it so
     // the operator can visually confirm what moved.
@@ -568,70 +569,39 @@ function renderLog(){
 const actions = document.createElement("span");
 actions.className = "log-actions";
 
-const mkBtn = (label, title, onClick) => {
+const mkBtn = (label, title, action) => {
+  // NOTE: We intentionally do NOT attach per-button click handlers here.
+  // The log is re-rendered frequently (polling), and per-node listeners are easy
+  // to accidentally lose or duplicate. Instead we use a single delegated handler
+  // attached once to the log container (see wireLogDelegatedHandlers()).
   const b = document.createElement("button");
   b.className = "mini";
   b.type = "button";
   b.textContent = label;
   b.title = title;
-  b.addEventListener("click", (e) => { e.stopPropagation(); onClick(); });
+  b.setAttribute("aria-label", title);
+  b.dataset.action = action;
   return b;
 };
 
-// Queue editing (v2): drag/drop + fallback buttons.
+// Queue editing (v3): drag/drop + delegated ▲/▼ click handling.
 // Guard rails: never mutate the currently playing row (idx=0).
 const canEdit = idx > 0;
 const canUp = canEdit && idx > 1;          // don't move above "playing"
 const canDown = canEdit && idx < state.log.length - 1;
 
-const up = mkBtn("▲", "Move up", async () => {
-  if(!canUp) return;
-  try{
-    if(state.apiMode === "LIVE"){
-      const upcoming = upcomingIdsFromState();
-      // upcoming[0] corresponds to log[1]
-      const newUpcoming = moveWithinUpcoming(upcoming, idx-1, idx-2);
-      armUndoForReorder();
-      armFlashForReorder();
-      await postUpcomingReorder(newUpcoming);
-      commitUndoForReorder();
-      await fetchStatus();
-    }else{
-      const it2 = state.log.splice(idx,1)[0];
-      state.log.splice(idx-1,0,it2);
-    }
-    toast("Moved up");
-  }catch(err){ alert(err.message || String(err)); }
-});
-const down = mkBtn("▼", "Move down", async () => {
-  if(!canDown) return;
-  try{
-    if(state.apiMode === "LIVE"){
-      const upcoming = upcomingIdsFromState();
-      const newUpcoming = moveWithinUpcoming(upcoming, idx-1, idx);
-      armUndoForReorder();
-      armFlashForReorder();
-      await postUpcomingReorder(newUpcoming);
-      commitUndoForReorder();
-      await fetchStatus();
-    }else{
-      const it2 = state.log.splice(idx,1)[0];
-      state.log.splice(idx+1,0,it2);
-    }
-    toast("Moved down");
-  }catch(err){ alert(err.message || String(err)); }
-});
-const del = mkBtn("✕", "Remove from queue", async () => {
-  if(!canEdit) return;
-  try{
-    // The backend doesn't expose a targeted "remove" yet. In LIVE mode we keep
-    // the UX safe by showing an explanatory message instead of silently failing.
-    if(state.apiMode === "LIVE") throw new Error("Remove not implemented on backend yet (queue/reorder only)");
-    state.log.splice(idx,1);
-    toast("Removed");
-  }catch(err){ alert(err.message || String(err)); }
-});
+const up = mkBtn("▲", "Move up", "up");
+const down = mkBtn("▼", "Move down", "down");
+const del = mkBtn("✕", "Remove from queue", "remove");
 
+if(!canUp) up.disabled = true;
+if(!canDown) down.disabled = true;
+if(!canEdit) del.disabled = true;
+
+actions.appendChild(up);
+actions.appendChild(down);
+actions.appendChild(del);
+meta.appendChild(actions);
 if(!canUp) up.disabled = true;
 if(!canDown) down.disabled = true;
 if(!canEdit) del.disabled = true;
@@ -1073,6 +1043,70 @@ function wireUI(){
   });
 }
 
+
+function wireLogDelegatedHandlers(){
+  // Delegated click handling for queue editing buttons (▲/▼/✕).
+  // Why delegation?
+  // - The log is re-rendered often (polling + drag/drop updates).
+  // - Delegation ensures buttons remain functional even after re-render.
+  // - It also reliably handles clicks on nested elements (e.g., SVG icons).
+  if(state._logDelegationWired) return;
+  state._logDelegationWired = true;
+
+  const list = qs("#logList");
+  list.addEventListener("click", async (e) => {
+    const btn = e.target.closest("button[data-action]");
+    if(!btn) return;
+
+    const action = btn.dataset.action;
+    if(!action) return;
+
+    // Find the row and its UUID. We store it on the row dataset for safety.
+    const row = btn.closest(".log-item");
+    const id = row ? row.dataset.id : null;
+    if(!id) return;
+
+    // The backend only supports reordering upcoming items (log[1:]).
+    // Index 0 is the pinned currently-playing row and is intentionally immovable.
+    const upcoming = upcomingIdsFromState();
+    const idxUpcoming = upcoming.indexOf(id);
+    if(idxUpcoming < 0) return;
+
+    try{
+      if(action === "up"){
+        if(idxUpcoming <= 0) return;
+        const newUpcoming = moveWithinUpcoming(upcoming, idxUpcoming, idxUpcoming-1);
+        armUndoForReorder();
+        armFlashForReorder();
+        await postUpcomingReorder(newUpcoming);
+        commitUndoForReorder();
+        await fetchStatus();
+        toast("Moved up");
+        return;
+      }
+
+      if(action === "down"){
+        if(idxUpcoming >= upcoming.length - 1) return;
+        const newUpcoming = moveWithinUpcoming(upcoming, idxUpcoming, idxUpcoming+1);
+        armUndoForReorder();
+        armFlashForReorder();
+        await postUpcomingReorder(newUpcoming);
+        commitUndoForReorder();
+        await fetchStatus();
+        toast("Moved down");
+        return;
+      }
+
+      if(action === "remove"){
+        // Not implemented on backend yet; keep UX honest.
+        throw new Error("Remove not implemented on backend yet (queue/reorder only)");
+      }
+    }catch(err){
+      alert(err.message || String(err));
+    }
+  }, true);
+}
+
 function simulateStatus(){
   // DEMO-only signal generator.
   // In LIVE mode, producers + queue are authoritative from /api/v1/status.
@@ -1154,6 +1188,7 @@ fetchStatus();
 setInterval(fetchStatus, 1000);
 renderApiBadge();
 wireUI();
+wireLogDelegatedHandlers();
 applyRole();
 renderLog();
 renderLibrary();
