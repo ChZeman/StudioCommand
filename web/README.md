@@ -82,6 +82,10 @@ controls (and keyboard support improves accessibility).
 - Focus any upcoming queue row (click it, or tab to it).
 - Press **Alt+↑** to move the row up.
 - Press **Alt+↓** to move the row down.
+- Fallback: **Ctrl+Shift+↑/↓** if your environment intercepts Alt+Arrow.
+- Notes: selection is tracked by stable queue item **id** (UUID), not fragile DOM focus.
+- Fallback: **Ctrl+Shift+↑/↓** if your environment intercepts Alt+Arrow.
+- Notes: selection is tracked by stable queue item **id** (UUID), not fragile DOM focus.
 
 Guard rails:
 

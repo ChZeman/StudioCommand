@@ -10,13 +10,14 @@ const TARGET_LOG_LEN = 12;
 
 // NOTE: UI_VERSION is purely informational (tooltip on the header).
 // The authoritative running version is exposed by the backend at /api/v1/status.
-const UI_VERSION = "0.1.32";
+const UI_VERSION = "0.1.33";
 
 const state = {
   role: "operator",
   log: [],
   history: [], // not displayed here; would be in reports/admin
   selectedLogIndex: 0,
+  selectedLogId: null,
   library: [],
   selectedLibraryIndex: 0,
   carts: {},
@@ -461,7 +462,7 @@ function renderLog(){
     const row = document.createElement("div");
     row.className = "log-item";
     row.tabIndex = 0;
-    // Keyboard support (v0.1.32): store the absolute queue index on every row.
+    // Keyboard support (v0.1.33): store the absolute queue index on every row.
     // We keep this even for the pinned playing row (idx=0) so the handler can
     // quickly reject unsafe moves without needing to infer indices from DOM.
     row.dataset.idx = String(idx);
@@ -648,11 +649,30 @@ meta.appendChild(actions);
     row.appendChild(stripe);
     row.appendChild(main);
 
-    if(idx === state.selectedLogIndex) row.style.outline = "2px solid rgba(79,156,255,.55)";
-    // Click + focus both select a row.
-    // Rationale: keyboard reordering uses the selected row as the target.
-    row.addEventListener("click", () => { state.selectedLogIndex = idx; renderLog(); });
-    row.addEventListener("focus", () => { state.selectedLogIndex = idx; renderLog(); });
+    // Selection + focus (v0.1.33)
+    // Keyboard reorder should *not* depend on the browser keeping DOM focus on the row.
+    // We therefore track selection by stable item id (UUID), and derive the current index
+    // from state.log whenever a key command is issued.
+    row.dataset.id = it.id || "";
+
+    const isSelected = (state.selectedLogId && it.id === state.selectedLogId)
+      || (!state.selectedLogId && idx === state.selectedLogIndex);
+
+    if(isSelected){
+      row.style.outline = "2px solid rgba(79,156,255,.55)";
+    }
+
+    const selectRow = () => {
+      state.selectedLogIndex = idx;
+      state.selectedLogId = it.id || null;
+      // Re-render so the outline follows selection.
+      renderLog();
+    };
+
+    // mousedown captures selection even if click is prevented by drag start on some browsers.
+    row.addEventListener("mousedown", selectRow);
+    row.addEventListener("click", selectRow);
+    row.addEventListener("focus", selectRow);
 
     el.appendChild(row);
   });
@@ -976,25 +996,33 @@ function wireUI(){
       return;
     }
 
-    // Keyboard queue reordering (v0.1.32)
-    // Alt+Up / Alt+Down moves the currently focused queue row.
-    // Design goals:
-    //  - fast, muscle-memory-friendly operators workflow
-    //  - accessibility (works without drag-and-drop)
-    //  - preserves backend invariants: never move the "playing" row (idx=0)
-    if(e.altKey && (key === "arrowup" || key === "arrowdown")){
-      const active = document.activeElement;
-      const idx = active && active.classList && active.classList.contains("log-item")
-        ? parseInt(active.dataset.idx || "0", 10)
-        : state.selectedLogIndex;
+    // Keyboard queue reordering (v0.1.33)
+    // Alt+Up / Alt+Down moves the selected queue row.
+    // We intentionally do NOT rely on DOM focus being perfect across browsers and
+    // frequent re-renders. Instead we track selection by stable UUID.
+    //
+    // Shortcut scheme:
+    //  - Alt+Up / Alt+Down (primary)
+    //  - Ctrl+Shift+Up / Ctrl+Shift+Down (fallback for environments that intercept Alt+Arrows)
+    const isArrow = (key === "arrowup" || key === "arrowdown");
+    const wantsMove = isArrow && ((e.altKey) || (e.ctrlKey && e.shiftKey));
 
-      // Guard rails: only upcoming items (idx > 0) are movable.
-      if(!Number.isFinite(idx) || idx <= 0) return;
-
+    if(wantsMove){
       const dir = (key === "arrowup") ? -1 : 1;
-      const newIdx = idx + dir;
 
-      // Do not cross the pinned playing row or fall off the list.
+      // Prefer the currently focused row, else fall back to the last selected id.
+      const active = document.activeElement;
+      const activeId = (active && active.classList && active.classList.contains("log-item"))
+        ? (active.dataset.id || null)
+        : null;
+
+      const selId = activeId || state.selectedLogId;
+      if(!selId) return;
+
+      const idx = state.log.findIndex(it => it.id === selId);
+      if(idx <= 0) return; // guard: never move the playing row
+
+      const newIdx = idx + dir;
       if(newIdx <= 0 || newIdx >= state.log.length) return;
 
       e.preventDefault();
@@ -1003,7 +1031,6 @@ function wireUI(){
         try{
           if(state.apiMode === "LIVE"){
             const upcoming = upcomingIdsFromState();
-            // upcoming[0] corresponds to log[1]
             const fromUpcoming = idx - 1;
             const toUpcoming = newIdx - 1;
             const newUpcoming = moveWithinUpcoming(upcoming, fromUpcoming, toUpcoming);
@@ -1011,6 +1038,8 @@ function wireUI(){
             armFlashForReorder();
             await postUpcomingReorder(newUpcoming);
             commitUndoForReorder();
+            // Keep selection stable across refresh.
+            state.selectedLogId = selId;
             await fetchStatus();
           }else{
             const it2 = state.log.splice(idx, 1)[0];
@@ -1022,7 +1051,7 @@ function wireUI(){
           // continue to act on the same item.
           requestAnimationFrame(() => {
             const rows = qsa("#logList .log-item");
-            const target = rows.find(r => (r.dataset && parseInt(r.dataset.idx||"0",10)) === newIdx);
+            const target = rows.find(r => (r.dataset && r.dataset.id === selId));
             if(target) target.focus();
           });
 
