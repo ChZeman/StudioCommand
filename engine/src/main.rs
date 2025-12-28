@@ -379,187 +379,6 @@ async fn load_topup_config_from_db_or_default() -> TopUpConfig {
     }
 }
 
-fn default_topup_config() -> TopUpConfig {
-    TopUpConfig { enabled: false, dir: "".into(), min_queue: 5, batch: 5 }
-}
-
-fn db_load_topup_config(conn: &Connection) -> anyhow::Result<TopUpConfig> {
-    db_init(conn)?;
-
-    let row_opt = conn.query_row("SELECT enabled, dir, min_queue, batch FROM top_up_config WHERE id = 1", [], |row| {
-        Ok(TopUpConfig {
-            enabled: row.get::<_, i64>(0)? != 0,
-            dir: row.get::<_, String>(1)?,
-            min_queue: row.get::<_, i64>(2)? as u16,
-            batch: row.get::<_, i64>(3)? as u16,
-        })
-    });
-
-    match row_opt {
-        Ok(cfg) => Ok(cfg),
-        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(default_topup_config()),
-        Err(e) => Err(e.into()),
-    }
-}
-
-fn db_save_topup_config(conn: &mut Connection, cfg: &TopUpConfig) -> anyhow::Result<()> {
-    db_init(conn)?;
-    conn.execute("INSERT INTO top_up_config (id, enabled, dir, min_queue, batch) VALUES (1, ?1, ?2, ?3, ?4) ON CONFLICT(id) DO UPDATE SET enabled=excluded.enabled, dir=excluded.dir, min_queue=excluded.min_queue, batch=excluded.batch",
-        params![ if cfg.enabled {1} else {0}, cfg.dir, cfg.min_queue as i64, cfg.batch as i64 ],
-    )?;
-    Ok(())
-}
-
-async fn load_topup_config_from_db_or_default() -> TopUpConfig {
-    let path = db_path();
-    let res = tokio::task::spawn_blocking(move || -> anyhow::Result<TopUpConfig> {
-        let conn = Connection::open(path)?;
-        db_load_topup_config(&conn)
-    }).await;
-
-    match res {
-        Ok(Ok(cfg)) => cfg,
-        Ok(Err(e)) => { tracing::warn!("failed to load top-up config, using defaults: {e}"); default_topup_config() },
-        Err(e) => { tracing::warn!("failed to join top-up config load task, using defaults: {e}"); default_topup_config() },
-    }
-}
-
-
-fn default_topup_config() -> TopUpConfig {
-    TopUpConfig { enabled: false, dir: "".into(), min_queue: 5, batch: 5 }
-}
-
-fn db_load_topup_config(conn: &Connection) -> anyhow::Result<TopUpConfig> {
-    db_init(conn)?;
-
-    let row_opt = conn.query_row(
-        "SELECT enabled, dir, min_queue, batch FROM top_up_config WHERE id = 1",
-        [],
-        |row| {
-            Ok(TopUpConfig {
-                enabled: row.get::<_, i64>(0)? != 0,
-                dir: row.get::<_, String>(1)?,
-                min_queue: row.get::<_, i64>(2)? as u16,
-                batch: row.get::<_, i64>(3)? as u16,
-            })
-        },
-    );
-
-    match row_opt {
-        Ok(cfg) => Ok(cfg),
-        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(default_topup_config()),
-        Err(e) => Err(e.into()),
-    }
-}
-
-fn db_save_topup_config(conn: &mut Connection, cfg: &TopUpConfig) -> anyhow::Result<()> {
-    db_init(conn)?;
-    conn.execute(
-        "INSERT INTO top_up_config (id, enabled, dir, min_queue, batch)
-         VALUES (1, ?1, ?2, ?3, ?4)
-         ON CONFLICT(id) DO UPDATE SET
-           enabled=excluded.enabled,
-           dir=excluded.dir,
-           min_queue=excluded.min_queue,
-           batch=excluded.batch",
-        params![
-            if cfg.enabled { 1 } else { 0 },
-            cfg.dir,
-            cfg.min_queue as i64,
-            cfg.batch as i64,
-        ],
-    )?;
-    Ok(())
-}
-
-async fn load_topup_config_from_db_or_default() -> TopUpConfig {
-    let path = db_path();
-    let res = tokio::task::spawn_blocking(move || -> anyhow::Result<TopUpConfig> {
-        let conn = Connection::open(path)?;
-        db_load_topup_config(&conn)
-    })
-    .await;
-
-    match res {
-        Ok(Ok(cfg)) => cfg,
-        Ok(Err(e)) => {
-            tracing::warn!("failed to load top-up config, using defaults: {e}");
-            default_topup_config()
-        }
-        Err(e) => {
-            tracing::warn!("failed to join top-up load task, using defaults: {e}");
-            default_topup_config()
-        }
-    }
-}
-
-fn default_topup_config() -> TopUpConfig {
-    TopUpConfig { enabled: false, dir: "".into(), min_queue: 5, batch: 5 }
-}
-
-fn db_load_topup_config(conn: &Connection) -> anyhow::Result<TopUpConfig> {
-    db_init(conn)?;
-
-    let row_opt = conn.query_row(
-        "SELECT enabled, dir, min_queue, batch FROM top_up_config WHERE id = 1",
-        [],
-        |row| {
-            Ok(TopUpConfig {
-                enabled: row.get::<_, i64>(0)? != 0,
-                dir: row.get::<_, String>(1)?,
-                min_queue: row.get::<_, i64>(2)? as u16,
-                batch: row.get::<_, i64>(3)? as u16,
-            })
-        },
-    );
-
-    match row_opt {
-        Ok(cfg) => Ok(cfg),
-        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(default_topup_config()),
-        Err(e) => Err(e.into()),
-    }
-}
-
-fn db_save_topup_config(conn: &mut Connection, cfg: &TopUpConfig) -> anyhow::Result<()> {
-    db_init(conn)?;
-    conn.execute(
-        "INSERT INTO top_up_config (id, enabled, dir, min_queue, batch)
-         VALUES (1, ?1, ?2, ?3, ?4)
-         ON CONFLICT(id) DO UPDATE SET
-           enabled=excluded.enabled,
-           dir=excluded.dir,
-           min_queue=excluded.min_queue,
-           batch=excluded.batch",
-        params![
-            if cfg.enabled { 1 } else { 0 },
-            cfg.dir,
-            cfg.min_queue as i64,
-            cfg.batch as i64,
-        ],
-    )?;
-    Ok(())
-}
-
-async fn load_topup_config_from_db_or_default() -> TopUpConfig {
-    let path = db_path();
-    let res = tokio::task::spawn_blocking(move || -> anyhow::Result<TopUpConfig> {
-        let conn = Connection::open(path)?;
-        db_load_topup_config(&conn)
-    })
-    .await;
-
-    match res {
-        Ok(Ok(cfg)) => cfg,
-        Ok(Err(e)) => {
-            tracing::warn!("failed to load top-up config, using defaults: {e}");
-            default_topup_config()
-        }
-        Err(e) => {
-            tracing::warn!("failed to join top-up config load task, using defaults: {e}");
-            default_topup_config()
-        }
-    }
-}
 fn db_load_output_config(conn: &Connection) -> anyhow::Result<StreamOutputConfig> {
     db_init(conn)?;
 
@@ -1619,73 +1438,6 @@ fn advance_to_next(p: &mut PlayoutState, reason: Option<&str>) {
 
 // --- Playout top-up (random folder filler) -------------------------------
 
-fn default_topup_config() -> TopUpConfig {
-    TopUpConfig { enabled: false, dir: "".into(), min_queue: 5, batch: 5 }
-}
-
-fn db_load_topup_config(conn: &Connection) -> anyhow::Result<TopUpConfig> {
-    db_init(conn)?;
-
-    let row_opt = conn.query_row(
-        "SELECT enabled, dir, min_queue, batch FROM top_up_config WHERE id = 1",
-        [],
-        |row| {
-            Ok(TopUpConfig {
-                enabled: row.get::<_, i64>(0)? != 0,
-                dir: row.get::<_, String>(1)?,
-                min_queue: row.get::<_, i64>(2)? as u16,
-                batch: row.get::<_, i64>(3)? as u16,
-            })
-        },
-    );
-
-    match row_opt {
-        Ok(cfg) => Ok(cfg),
-        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(default_topup_config()),
-        Err(e) => Err(e.into()),
-    }
-}
-
-fn db_save_topup_config(conn: &mut Connection, cfg: &TopUpConfig) -> anyhow::Result<()> {
-    db_init(conn)?;
-    conn.execute(
-        "INSERT INTO top_up_config (id, enabled, dir, min_queue, batch)
-         VALUES (1, ?1, ?2, ?3, ?4)
-         ON CONFLICT(id) DO UPDATE SET
-           enabled=excluded.enabled,
-           dir=excluded.dir,
-           min_queue=excluded.min_queue,
-           batch=excluded.batch",
-        params![
-            if cfg.enabled { 1 } else { 0 },
-            cfg.dir,
-            cfg.min_queue as i64,
-            cfg.batch as i64,
-        ],
-    )?;
-    Ok(())
-}
-
-async fn load_topup_config_from_db_or_default() -> TopUpConfig {
-    let path = db_path();
-    let res = tokio::task::spawn_blocking(move || -> anyhow::Result<TopUpConfig> {
-        let conn = Connection::open(path)?;
-        db_load_topup_config(&conn)
-    })
-    .await;
-
-    match res {
-        Ok(Ok(cfg)) => cfg,
-        Ok(Err(e)) => {
-            tracing::warn!("failed to load top-up config, using defaults: {e}");
-            default_topup_config()
-        }
-        Err(e) => {
-            tracing::warn!("failed to join top-up config load task, using defaults: {e}");
-            default_topup_config()
-        }
-    }
-}
 
 #[derive(Serialize)]
 struct TopUpGetResponse {
@@ -1883,8 +1635,8 @@ async fn topup_if_needed(log: &mut Vec<LogItem>, cfg: &TopUpConfig) {
         tries += 1;
     }
 
-    for i in picked {
-        let path = &files[i];
+    for i in &picked {
+        let path = &files[*i];
         log.push(LogItem {
             id: Uuid::new_v4(),
             tag: "MUS".into(),
@@ -1924,13 +1676,20 @@ async fn writer_playout(
                 (Uuid::nil(), "".into(), "".into(), 0u32, None)
             } else {
                 normalize_queue_states(&mut p.log);
-                let first = &p.log[0];
 
-                let title = first.title.clone();
-                let artist = first.artist.clone();
-                let dur_s = parse_dur_seconds(&first.dur).unwrap_or(0);
-                let path_opt = resolve_cart_to_path(&first.cart)
-                    .or_else(|| if first.cart.starts_with('/') { Some(first.cart.clone()) } else { None });
+                let (first_id, title, artist, dur_s, cart) = {
+                    let first = &p.log[0];
+                    (
+                        first.id,
+                        first.title.clone(),
+                        first.artist.clone(),
+                        parse_dur_seconds(&first.dur).unwrap_or(0),
+                        first.cart.clone(),
+                    )
+                };
+
+                let path_opt = resolve_cart_to_path(&cart)
+                    .or_else(|| if cart.starts_with('/') { Some(cart.clone()) } else { None });
 
                 // Update now-playing.
                 p.now.title = title.clone();
@@ -1938,7 +1697,7 @@ async fn writer_playout(
                 p.now.dur = dur_s;
                 p.now.pos = 0;
 
-                (first.id, title, artist, dur_s, path_opt)
+                (first_id, title, artist, dur_s, path_opt)
             }
         };
 
@@ -1995,11 +1754,19 @@ async fn writer_playout(
                 normalize_queue_states(&mut p.log);
 
                 if let Some(first) = p.log.get(0) {
-                    p.now.title = first.title.clone();
-                    p.now.artist = first.artist.clone();
-                    p.now.dur = parse_dur_seconds(&first.dur).unwrap_or(0);
+                    let (t, a, d) = (
+                        first.title.clone(),
+                        first.artist.clone(),
+                        parse_dur_seconds(&first.dur).unwrap_or(0),
+                    );
+                    p.now.title = t;
+                    p.now.artist = a;
+                    p.now.dur = d;
                     p.now.pos = 0;
                 } else {
+                    p.now.title.clear();
+                    p.now.artist.clear();
+                    p.now.dur = 0;
                     p.now.pos = 0;
                 }
 
