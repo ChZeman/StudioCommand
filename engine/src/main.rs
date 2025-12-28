@@ -711,10 +711,10 @@ async fn playout_tick(playout: Arc<tokio::sync::RwLock<PlayoutState>>) {
             }
 
             // Promote new playing item from top of log.
+            // Anchor timing for UI/progress and any dur-based logic.
+            p.track_started_at = Some(std::time::Instant::now());
+            p.vu = VuLevels::default();
             if let Some(first) = p.log.get_mut(0) {
-                // Anchor timing for UI/progress and any dur-based logic.
-                p.track_started_at = Some(std::time::Instant::now());
-                p.vu = VuLevels::default();
                 // Mark the first log item as playing. We must avoid holding a mutable
                 // borrow of `first` while also mutating `p.now` (Rust borrow rules).
                 first.state = "playing".into();
