@@ -1893,18 +1893,16 @@ async fn writer_playout(
                 let path_opt = resolve_cart_to_path(&cart)
                     .or_else(|| if cart.starts_with('/') { Some(cart.clone()) } else { None });
 
-                // Update now-playing (monotonic clock anchor + reset meters).
-                p.now.title = title.clone();
-                p.now.artist = artist.clone();
-                p.now.dur = dur_s;
-                p.now.pos = 0;
-    p.now.pos_f = 0.0;
-    p.track_started_at = Some(std::time::Instant::now());
-    p.vu = VuLevels::default();
-                p.track_started_at = Some(std::time::Instant::now());
-                p.vu = VuLevels::default();
+                // Update now-playing (anchor timing + reset meters/progress).
+p.now.title = title.clone();
+p.now.artist = artist.clone();
+p.now.dur = dur_s;
+p.now.pos = 0;
+p.now.pos_f = 0.0;
+p.track_started_at = Some(std::time::Instant::now());
+p.vu = VuLevels::default();
 
-                (first_id, title, artist, dur_s, path_opt)
+(first_id, title, artist, dur_s, path_opt)
             }
         };
 
@@ -1930,8 +1928,12 @@ async fn writer_playout(
 
 let mut buf = vec![0u8; CHUNK_BYTES];
 
-// Meter smoothing is handled here so the UI stays stable.
-let mut last_meter_update = std::time::Instant::now() - std::time::Duration::from_secs(1);
+// Progress derived from actual PCM that we successfully feed to the encoder.
+// For s16le stereo, each frame is 4 bytes (2 bytes per channel).
+let mut frames_written: u64 = 0;
+
+// Meter + position updates (keep lock cadence modest).
+let mut last_update = std::time::Instant::now() - std::time::Duration::from_secs(1);
 
 loop {
     let n = dec_stdout.read(&mut buf).await?;
@@ -1946,17 +1948,30 @@ loop {
     interval.tick().await;
     stdin.write_all(&buf[..n]).await?;
 
-    // Update meters at ~30 Hz (cheap).
-    if last_meter_update.elapsed() >= std::time::Duration::from_millis(33) {
-        last_meter_update = std::time::Instant::now();
+    // Count frames actually delivered to the encoder.
+    frames_written += (n / BYTES_PER_FRAME) as u64;
+
+    // Update meters + position at ~30 Hz.
+    if last_update.elapsed() >= std::time::Duration::from_millis(33) {
+        last_update = std::time::Instant::now();
+
+        let pos_f = frames_written as f64 / SR as f64;
 
         let mut p = playout.write().await;
-        // RMS smoothing (slower).
-        p.vu.rms_l = smooth_level(p.vu.rms_l, inst.rms_l, 0.75, 0.25);
-        p.vu.rms_r = smooth_level(p.vu.rms_r, inst.rms_r, 0.75, 0.25);
-        // Peak smoothing (faster attack, slower decay).
-        p.vu.peak_l = smooth_level(p.vu.peak_l, inst.peak_l, 0.90, 0.35);
-        p.vu.peak_r = smooth_level(p.vu.peak_r, inst.peak_r, 0.90, 0.35);
+
+        // Position (seconds). Clamp only when we have a known duration.
+        p.now.pos_f = if p.now.dur > 0 {
+            pos_f.min(p.now.dur as f64)
+        } else {
+            pos_f
+        };
+        p.now.pos = p.now.pos_f.floor() as u32;
+
+        // Faster ballistics: snappy attack, moderate decay.
+        p.vu.rms_l = smooth_level(p.vu.rms_l, inst.rms_l, 0.95, 0.55);
+        p.vu.rms_r = smooth_level(p.vu.rms_r, inst.rms_r, 0.95, 0.55);
+        p.vu.peak_l = smooth_level(p.vu.peak_l, inst.peak_l, 1.00, 0.65);
+        p.vu.peak_r = smooth_level(p.vu.peak_r, inst.peak_r, 1.00, 0.65);
     }
 }
 
