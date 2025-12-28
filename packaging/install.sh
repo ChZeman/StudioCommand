@@ -49,7 +49,7 @@ SHARED="${ROOT}/shared"
 CURRENT="${ROOT}/current"
 
 echo "[*] Installing StudioCommand ${VERSION} to ${ROOT}"
-mkdir -p "${ROOT}/releases" "${SHARED}/config" "${SHARED}/data" "${SHARED}/updates" "${SHARED}/logs"
+mkdir -p "${ROOT}/releases" "${SHARED}/config" "${SHARED}/data" "${SHARED}/updates" "${SHARED}/logs" "${SHARED}/carts"
 
 if ! id -u studiocommand >/dev/null 2>&1; then
   useradd --system --home /opt/studiocommand --shell /usr/sbin/nologin studiocommand

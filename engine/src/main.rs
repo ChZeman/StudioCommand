@@ -21,6 +21,7 @@ use rusqlite::{Connection, params};
 use sysinfo::System;
 use tracing::{info, warn};
 use tokio::io::AsyncWriteExt;
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use std::collections::VecDeque;
@@ -30,6 +31,7 @@ struct AppState {
     version: String,
     sys: Arc<tokio::sync::Mutex<System>>,
     playout: Arc<tokio::sync::RwLock<PlayoutState>>,
+    topup: Arc<tokio::sync::Mutex<TopUpConfig>>,
     output: Arc<tokio::sync::Mutex<OutputRuntime>>,
 }
 
@@ -51,6 +53,15 @@ struct StreamOutputConfig {
     description: Option<String>,
     public: Option<bool>,
 }
+
+#[derive(Clone, Serialize, Deserialize, Default)]
+struct TopUpConfig {
+    enabled: bool,
+    dir: String,
+    min_queue: u16,
+    batch: u16,
+}
+
 
 #[derive(Clone, Serialize, Deserialize)]
 struct StreamOutputStatus {
@@ -132,7 +143,7 @@ fn db_init(conn: &Connection) -> rusqlite::Result<()> {
 
         CREATE INDEX IF NOT EXISTS idx_queue_items_position ON queue_items(position);
 
-        CREATE TABLE IF NOT EXISTS stream_output_config (
+         CREATE TABLE IF NOT EXISTS stream_output_config (
             id            INTEGER PRIMARY KEY CHECK (id = 1),
             type          TEXT NOT NULL,
             host          TEXT NOT NULL,
@@ -147,6 +158,14 @@ fn db_init(conn: &Connection) -> rusqlite::Result<()> {
             genre         TEXT,
             description   TEXT,
             public        INTEGER
+        );
+
+        CREATE TABLE IF NOT EXISTS top_up_config (
+            id            INTEGER PRIMARY KEY CHECK (id = 1),
+            enabled       INTEGER NOT NULL,
+            dir           TEXT NOT NULL,
+            min_queue     INTEGER NOT NULL,
+            batch         INTEGER NOT NULL
         );
         "#,
     )?;
@@ -292,6 +311,255 @@ fn default_output_config() -> StreamOutputConfig {
     }
 }
 
+fn default_topup_config() -> TopUpConfig {
+    TopUpConfig { enabled: false, dir: "".into(), min_queue: 5, batch: 5 }
+}
+
+fn db_load_topup_config(conn: &Connection) -> anyhow::Result<TopUpConfig> {
+    db_init(conn)?;
+
+    let row_opt = conn.query_row(
+        "SELECT enabled, dir, min_queue, batch FROM top_up_config WHERE id = 1",
+        [],
+        |row| {
+            Ok(TopUpConfig {
+                enabled: row.get::<_, i64>(0)? != 0,
+                dir: row.get::<_, String>(1)?,
+                min_queue: row.get::<_, i64>(2)? as u16,
+                batch: row.get::<_, i64>(3)? as u16,
+            })
+        },
+    );
+
+    match row_opt {
+        Ok(cfg) => Ok(cfg),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(default_topup_config()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+fn db_save_topup_config(conn: &mut Connection, cfg: &TopUpConfig) -> anyhow::Result<()> {
+    db_init(conn)?;
+    conn.execute(
+        "INSERT INTO top_up_config (id, enabled, dir, min_queue, batch)
+         VALUES (1, ?1, ?2, ?3, ?4)
+         ON CONFLICT(id) DO UPDATE SET
+           enabled=excluded.enabled,
+           dir=excluded.dir,
+           min_queue=excluded.min_queue,
+           batch=excluded.batch",
+        params![
+            if cfg.enabled { 1 } else { 0 },
+            cfg.dir,
+            cfg.min_queue as i64,
+            cfg.batch as i64,
+        ],
+    )?;
+    Ok(())
+}
+
+async fn load_topup_config_from_db_or_default() -> TopUpConfig {
+    let path = db_path();
+    let res = tokio::task::spawn_blocking(move || -> anyhow::Result<TopUpConfig> {
+        let conn = Connection::open(path)?;
+        db_load_topup_config(&conn)
+    })
+    .await;
+
+    match res {
+        Ok(Ok(cfg)) => cfg,
+        Ok(Err(e)) => {
+            tracing::warn!("failed to load top-up config, using defaults: {e}");
+            default_topup_config()
+        }
+        Err(e) => {
+            tracing::warn!("failed to join top-up load task, using defaults: {e}");
+            default_topup_config()
+        }
+    }
+}
+
+fn default_topup_config() -> TopUpConfig {
+    TopUpConfig { enabled: false, dir: "".into(), min_queue: 5, batch: 5 }
+}
+
+fn db_load_topup_config(conn: &Connection) -> anyhow::Result<TopUpConfig> {
+    db_init(conn)?;
+
+    let row_opt = conn.query_row("SELECT enabled, dir, min_queue, batch FROM top_up_config WHERE id = 1", [], |row| {
+        Ok(TopUpConfig {
+            enabled: row.get::<_, i64>(0)? != 0,
+            dir: row.get::<_, String>(1)?,
+            min_queue: row.get::<_, i64>(2)? as u16,
+            batch: row.get::<_, i64>(3)? as u16,
+        })
+    });
+
+    match row_opt {
+        Ok(cfg) => Ok(cfg),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(default_topup_config()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+fn db_save_topup_config(conn: &mut Connection, cfg: &TopUpConfig) -> anyhow::Result<()> {
+    db_init(conn)?;
+    conn.execute("INSERT INTO top_up_config (id, enabled, dir, min_queue, batch) VALUES (1, ?1, ?2, ?3, ?4) ON CONFLICT(id) DO UPDATE SET enabled=excluded.enabled, dir=excluded.dir, min_queue=excluded.min_queue, batch=excluded.batch",
+        params![ if cfg.enabled {1} else {0}, cfg.dir, cfg.min_queue as i64, cfg.batch as i64 ],
+    )?;
+    Ok(())
+}
+
+async fn load_topup_config_from_db_or_default() -> TopUpConfig {
+    let path = db_path();
+    let res = tokio::task::spawn_blocking(move || -> anyhow::Result<TopUpConfig> {
+        let conn = Connection::open(path)?;
+        db_load_topup_config(&conn)
+    }).await;
+
+    match res {
+        Ok(Ok(cfg)) => cfg,
+        Ok(Err(e)) => { tracing::warn!("failed to load top-up config, using defaults: {e}"); default_topup_config() },
+        Err(e) => { tracing::warn!("failed to join top-up config load task, using defaults: {e}"); default_topup_config() },
+    }
+}
+
+
+fn default_topup_config() -> TopUpConfig {
+    TopUpConfig { enabled: false, dir: "".into(), min_queue: 5, batch: 5 }
+}
+
+fn db_load_topup_config(conn: &Connection) -> anyhow::Result<TopUpConfig> {
+    db_init(conn)?;
+
+    let row_opt = conn.query_row(
+        "SELECT enabled, dir, min_queue, batch FROM top_up_config WHERE id = 1",
+        [],
+        |row| {
+            Ok(TopUpConfig {
+                enabled: row.get::<_, i64>(0)? != 0,
+                dir: row.get::<_, String>(1)?,
+                min_queue: row.get::<_, i64>(2)? as u16,
+                batch: row.get::<_, i64>(3)? as u16,
+            })
+        },
+    );
+
+    match row_opt {
+        Ok(cfg) => Ok(cfg),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(default_topup_config()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+fn db_save_topup_config(conn: &mut Connection, cfg: &TopUpConfig) -> anyhow::Result<()> {
+    db_init(conn)?;
+    conn.execute(
+        "INSERT INTO top_up_config (id, enabled, dir, min_queue, batch)
+         VALUES (1, ?1, ?2, ?3, ?4)
+         ON CONFLICT(id) DO UPDATE SET
+           enabled=excluded.enabled,
+           dir=excluded.dir,
+           min_queue=excluded.min_queue,
+           batch=excluded.batch",
+        params![
+            if cfg.enabled { 1 } else { 0 },
+            cfg.dir,
+            cfg.min_queue as i64,
+            cfg.batch as i64,
+        ],
+    )?;
+    Ok(())
+}
+
+async fn load_topup_config_from_db_or_default() -> TopUpConfig {
+    let path = db_path();
+    let res = tokio::task::spawn_blocking(move || -> anyhow::Result<TopUpConfig> {
+        let conn = Connection::open(path)?;
+        db_load_topup_config(&conn)
+    })
+    .await;
+
+    match res {
+        Ok(Ok(cfg)) => cfg,
+        Ok(Err(e)) => {
+            tracing::warn!("failed to load top-up config, using defaults: {e}");
+            default_topup_config()
+        }
+        Err(e) => {
+            tracing::warn!("failed to join top-up load task, using defaults: {e}");
+            default_topup_config()
+        }
+    }
+}
+
+fn default_topup_config() -> TopUpConfig {
+    TopUpConfig { enabled: false, dir: "".into(), min_queue: 5, batch: 5 }
+}
+
+fn db_load_topup_config(conn: &Connection) -> anyhow::Result<TopUpConfig> {
+    db_init(conn)?;
+
+    let row_opt = conn.query_row(
+        "SELECT enabled, dir, min_queue, batch FROM top_up_config WHERE id = 1",
+        [],
+        |row| {
+            Ok(TopUpConfig {
+                enabled: row.get::<_, i64>(0)? != 0,
+                dir: row.get::<_, String>(1)?,
+                min_queue: row.get::<_, i64>(2)? as u16,
+                batch: row.get::<_, i64>(3)? as u16,
+            })
+        },
+    );
+
+    match row_opt {
+        Ok(cfg) => Ok(cfg),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(default_topup_config()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+fn db_save_topup_config(conn: &mut Connection, cfg: &TopUpConfig) -> anyhow::Result<()> {
+    db_init(conn)?;
+    conn.execute(
+        "INSERT INTO top_up_config (id, enabled, dir, min_queue, batch)
+         VALUES (1, ?1, ?2, ?3, ?4)
+         ON CONFLICT(id) DO UPDATE SET
+           enabled=excluded.enabled,
+           dir=excluded.dir,
+           min_queue=excluded.min_queue,
+           batch=excluded.batch",
+        params![
+            if cfg.enabled { 1 } else { 0 },
+            cfg.dir,
+            cfg.min_queue as i64,
+            cfg.batch as i64,
+        ],
+    )?;
+    Ok(())
+}
+
+async fn load_topup_config_from_db_or_default() -> TopUpConfig {
+    let path = db_path();
+    let res = tokio::task::spawn_blocking(move || -> anyhow::Result<TopUpConfig> {
+        let conn = Connection::open(path)?;
+        db_load_topup_config(&conn)
+    })
+    .await;
+
+    match res {
+        Ok(Ok(cfg)) => cfg,
+        Ok(Err(e)) => {
+            tracing::warn!("failed to load top-up config, using defaults: {e}");
+            default_topup_config()
+        }
+        Err(e) => {
+            tracing::warn!("failed to join top-up config load task, using defaults: {e}");
+            default_topup_config()
+        }
+    }
+}
 fn db_load_output_config(conn: &Connection) -> anyhow::Result<StreamOutputConfig> {
     db_init(conn)?;
 
@@ -470,6 +738,9 @@ let log = load_queue_from_db_or_demo().await;
 // Load streaming output config (Icecast) from SQLite (or defaults).
 let output_cfg = load_output_config_from_db_or_default().await;
 
+// Load playout top-up config (random folder filler) from SQLite (or defaults).
+let topup_cfg = load_topup_config_from_db_or_default().await;
+
 // Ensure the current queue is persisted so restarts are deterministic.
 // This is cheap (single transaction) and makes initial installs predictable.
 persist_queue(log.clone()).await;
@@ -485,6 +756,7 @@ let state = AppState {
     version: version.clone(),
     sys: Arc::new(tokio::sync::Mutex::new(sys)),
     playout: Arc::new(tokio::sync::RwLock::new(playout)),
+    topup: Arc::new(tokio::sync::Mutex::new(topup_cfg)),
     output: Arc::new(tokio::sync::Mutex::new(OutputRuntime::new(output_cfg))),
 };
 
@@ -492,16 +764,18 @@ let state = AppState {
 // (If ffmpeg isn't installed or creds are wrong, status will surface the error.)
 {
     let out = state.output.clone();
+    let pl = state.playout.clone();
+    let tu = state.topup.clone();
     let enabled = out.lock().await.config.enabled;
     if enabled {
         tokio::spawn(async move {
-            let _ = output_start_internal(out).await;
+            let _ = output_start_internal(out, pl, tu).await;
         });
     }
 }
 
 // Background tick: advances the demo queue once per second.
-tokio::spawn(playout_tick(state.playout.clone()));
+// tokio::spawn(playout_tick(state.playout.clone()));
 
 
     let app = build_router(state);
@@ -539,6 +813,8 @@ fn build_router(state: AppState) -> Router {
         .route("/api/v1/output/config", post(api_output_set_config))
         .route("/api/v1/output/start", post(api_output_start))
         .route("/api/v1/output/stop", post(api_output_stop))
+        .route("/api/v1/playout/topup", get(api_topup_get))
+        .route("/api/v1/playout/topup/config", post(api_topup_set_config))
         .route("/admin/api/v1/update/status", get(update_status))
         .with_state(state)
 }
@@ -859,7 +1135,7 @@ async fn api_output_set_config(
 }
 
 async fn api_output_start(State(state): State<AppState>) -> Result<Json<serde_json::Value>, StatusCode> {
-    output_start_internal(state.output.clone()).await?;
+    output_start_internal(state.output.clone(), state.playout.clone(), state.topup.clone()).await?;
     Ok(Json(json!({"ok": true})))
 }
 
@@ -868,7 +1144,7 @@ async fn api_output_stop(State(state): State<AppState>) -> Result<Json<serde_jso
     Ok(Json(json!({"ok": true})))
 }
 
-async fn output_start_internal(output: Arc<tokio::sync::Mutex<OutputRuntime>>) -> Result<(), StatusCode> {
+async fn output_start_internal(output: Arc<tokio::sync::Mutex<OutputRuntime>>, playout: Arc<tokio::sync::RwLock<PlayoutState>>, topup: Arc<tokio::sync::Mutex<TopUpConfig>>) -> Result<(), StatusCode> {
     let mut o = output.lock().await;
     if o.ffmpeg_child.is_some() {
         return Err(StatusCode::CONFLICT);
@@ -896,7 +1172,7 @@ async fn output_start_internal(output: Arc<tokio::sync::Mutex<OutputRuntime>>) -
 
     let output_for_writer = output.clone();
     let writer_task = tokio::spawn(async move {
-        if let Err(e) = writer_sine_wave(stdin).await {
+        if let Err(e) = writer_playout(stdin, playout, topup).await {
             let mut o = output_for_writer.lock().await;
             o.status.state = "error".into();
             o.status.last_error = Some(format!("audio writer: {e}"));
@@ -1338,5 +1614,406 @@ fn advance_to_next(p: &mut PlayoutState, reason: Option<&str>) {
                 p.log[i].state = "queued".into();
             }
         }
+    }
+}
+
+// --- Playout top-up (random folder filler) -------------------------------
+
+fn default_topup_config() -> TopUpConfig {
+    TopUpConfig { enabled: false, dir: "".into(), min_queue: 5, batch: 5 }
+}
+
+fn db_load_topup_config(conn: &Connection) -> anyhow::Result<TopUpConfig> {
+    db_init(conn)?;
+
+    let row_opt = conn.query_row(
+        "SELECT enabled, dir, min_queue, batch FROM top_up_config WHERE id = 1",
+        [],
+        |row| {
+            Ok(TopUpConfig {
+                enabled: row.get::<_, i64>(0)? != 0,
+                dir: row.get::<_, String>(1)?,
+                min_queue: row.get::<_, i64>(2)? as u16,
+                batch: row.get::<_, i64>(3)? as u16,
+            })
+        },
+    );
+
+    match row_opt {
+        Ok(cfg) => Ok(cfg),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(default_topup_config()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+fn db_save_topup_config(conn: &mut Connection, cfg: &TopUpConfig) -> anyhow::Result<()> {
+    db_init(conn)?;
+    conn.execute(
+        "INSERT INTO top_up_config (id, enabled, dir, min_queue, batch)
+         VALUES (1, ?1, ?2, ?3, ?4)
+         ON CONFLICT(id) DO UPDATE SET
+           enabled=excluded.enabled,
+           dir=excluded.dir,
+           min_queue=excluded.min_queue,
+           batch=excluded.batch",
+        params![
+            if cfg.enabled { 1 } else { 0 },
+            cfg.dir,
+            cfg.min_queue as i64,
+            cfg.batch as i64,
+        ],
+    )?;
+    Ok(())
+}
+
+async fn load_topup_config_from_db_or_default() -> TopUpConfig {
+    let path = db_path();
+    let res = tokio::task::spawn_blocking(move || -> anyhow::Result<TopUpConfig> {
+        let conn = Connection::open(path)?;
+        db_load_topup_config(&conn)
+    })
+    .await;
+
+    match res {
+        Ok(Ok(cfg)) => cfg,
+        Ok(Err(e)) => {
+            tracing::warn!("failed to load top-up config, using defaults: {e}");
+            default_topup_config()
+        }
+        Err(e) => {
+            tracing::warn!("failed to join top-up config load task, using defaults: {e}");
+            default_topup_config()
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct TopUpGetResponse {
+    config: TopUpConfig,
+}
+
+async fn api_topup_get(State(state): State<AppState>) -> Json<TopUpGetResponse> {
+    let cfg = state.topup.lock().await.clone();
+    Json(TopUpGetResponse { config: cfg })
+}
+
+async fn api_topup_set_config(
+    State(state): State<AppState>,
+    Json(mut cfg): Json<TopUpConfig>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    // Basic validation / normalization
+    cfg.dir = cfg.dir.trim().to_string();
+    if cfg.min_queue == 0 || cfg.min_queue > 100 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    if cfg.batch == 0 || cfg.batch > 100 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let path = db_path();
+    let cfg_clone = cfg.clone();
+    tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+        let mut conn = Connection::open(path)?;
+        db_save_topup_config(&mut conn, &cfg_clone)?;
+        Ok(())
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let mut cur = state.topup.lock().await;
+    *cur = cfg;
+
+    Ok(Json(json!({"ok": true})))
+}
+
+// --- Real playout writer --------------------------------------------------
+
+fn resolve_cart_to_path(cart: &str) -> Option<String> {
+    use std::path::Path;
+
+    let cart = cart.trim();
+    if cart.is_empty() {
+        return None;
+    }
+
+    // Absolute path
+    if cart.starts_with('/') && Path::new(cart).exists() {
+        return Some(cart.to_string());
+    }
+
+    // Shared carts folder lookup: /opt/studiocommand/shared/carts/<cart>.<ext>
+    let base = "/opt/studiocommand/shared/carts";
+    let exts = ["flac", "wav", "mp3", "m4a", "aac", "ogg", "opus"]; // decode via ffmpeg
+    for ext in exts {
+        let p = format!("{base}/{cart}.{ext}");
+        if Path::new(&p).exists() {
+            return Some(p);
+        }
+    }
+
+    None
+}
+
+async fn spawn_ffmpeg_decoder(input: &str) -> anyhow::Result<(tokio::process::Child, tokio::process::ChildStdout)> {
+    let ffmpeg = std::env::var("STUDIOCOMMAND_FFMPEG").unwrap_or_else(|_| "ffmpeg".to_string());
+
+    let mut cmd = Command::new(ffmpeg);
+    cmd.arg("-hide_banner")
+        .arg("-loglevel").arg("error")
+        .arg("-i").arg(input)
+        .arg("-f").arg("s16le")
+        .arg("-ar").arg("44100")
+        .arg("-ac").arg("2")
+        .arg("pipe:1")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+
+    let mut child = cmd.spawn()?;
+    let stdout = child.stdout.take().ok_or_else(|| anyhow::anyhow!("decoder stdout unavailable"))?;
+    Ok((child, stdout))
+}
+
+fn make_silence_chunk(frames: usize) -> Vec<u8> {
+    // s16le stereo = 2 bytes * 2 channels
+    vec![0u8; frames * 2 * 2]
+}
+
+fn parse_dur_seconds(dur: &str) -> Option<u32> {
+    let dur = dur.trim();
+    let (m, s) = dur.split_once(':')?;
+    let m: u32 = m.parse().ok()?;
+    let s: u32 = s.parse().ok()?;
+    Some(m * 60 + s)
+}
+
+fn normalize_queue_states(log: &mut Vec<LogItem>) {
+    normalize_log_markers(log);
+    if let Some(first) = log.get_mut(0) {
+        first.state = "playing".into();
+    }
+    if let Some(second) = log.get_mut(1) {
+        second.state = "next".into();
+    }
+    for i in 2..log.len() {
+        log[i].state = "queued".into();
+    }
+}
+
+fn title_from_path(p: &str) -> String {
+    use std::path::Path;
+    Path::new(p)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("Unknown")
+        .replace('_', " ")
+}
+
+fn scan_audio_files_recursive(dir: &str) -> anyhow::Result<Vec<String>> {
+    use std::path::Path;
+    let mut out = Vec::new();
+    let allowed = ["flac", "wav", "mp3", "m4a", "aac", "ogg", "opus"]; // decoder-supported
+
+    fn walk(path: &Path, allowed: &[&str], out: &mut Vec<String>) {
+        if let Ok(rd) = std::fs::read_dir(path) {
+            for ent in rd.flatten() {
+                let p = ent.path();
+                if p.is_dir() {
+                    walk(&p, allowed, out);
+                } else if p.is_file() {
+                    if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
+                        let ext_lc = ext.to_ascii_lowercase();
+                        if allowed.iter().any(|a| *a == ext_lc) {
+                            if let Some(s) = p.to_str() {
+                                out.push(s.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let root = Path::new(dir);
+    if !root.exists() {
+        anyhow::bail!("top-up dir does not exist: {dir}");
+    }
+    walk(root, &allowed, &mut out);
+    Ok(out)
+}
+
+async fn topup_if_needed(log: &mut Vec<LogItem>, cfg: &TopUpConfig) {
+    if !cfg.enabled {
+        return;
+    }
+    if cfg.dir.trim().is_empty() {
+        return;
+    }
+
+    if log.len() as u16 >= cfg.min_queue {
+        return;
+    }
+
+    let dir = cfg.dir.clone();
+    let batch = cfg.batch as usize;
+    let files_res = tokio::task::spawn_blocking(move || scan_audio_files_recursive(&dir)).await;
+    let files = match files_res {
+        Ok(Ok(v)) => v,
+        Ok(Err(e)) => {
+            tracing::warn!("top-up scan failed: {e}");
+            return;
+        }
+        Err(e) => {
+            tracing::warn!("top-up scan join failed: {e}");
+            return;
+        }
+    };
+
+    if files.is_empty() {
+        tracing::warn!("top-up dir had no audio files: {}", cfg.dir);
+        return;
+    }
+
+    // Pick random unique files.
+    let mut picked = std::collections::HashSet::<usize>::new();
+    let mut tries = 0usize;
+    while picked.len() < batch && tries < batch * 20 {
+        let i = fastrand::usize(..files.len());
+        picked.insert(i);
+        tries += 1;
+    }
+
+    for i in picked {
+        let path = &files[i];
+        log.push(LogItem {
+            id: Uuid::new_v4(),
+            tag: "MUS".into(),
+            time: "".into(),
+            title: title_from_path(path),
+            artist: "TopUp".into(),
+            state: "queued".into(),
+            dur: "0:00".into(),
+            cart: path.clone(), // absolute path
+        });
+    }
+
+    normalize_queue_states(log);
+    tracing::info!("top-up appended {} items from {}", picked.len(), cfg.dir);
+}
+
+async fn writer_playout(
+    mut stdin: tokio::process::ChildStdin,
+    playout: Arc<tokio::sync::RwLock<PlayoutState>>,
+    topup: Arc<tokio::sync::Mutex<TopUpConfig>>,
+) -> anyhow::Result<()> {
+    const SR: u32 = 44100;
+    const FRAMES: usize = 1024;
+    const BYTES_PER_FRAME: usize = 2 * 2; // s16le * stereo
+    const CHUNK_BYTES: usize = FRAMES * BYTES_PER_FRAME;
+
+    let silence = make_silence_chunk(FRAMES);
+    let mut interval = tokio::time::interval(std::time::Duration::from_millis(20));
+
+    loop {
+        // Determine current track (log[0]) and resolve its path.
+        let (id, title, artist, dur_s, path_opt) = {
+            let mut p = playout.write().await;
+
+            if p.log.is_empty() {
+                // Nothing to play.
+                (Uuid::nil(), "".into(), "".into(), 0u32, None)
+            } else {
+                normalize_queue_states(&mut p.log);
+                let first = &p.log[0];
+
+                let title = first.title.clone();
+                let artist = first.artist.clone();
+                let dur_s = parse_dur_seconds(&first.dur).unwrap_or(0);
+                let path_opt = resolve_cart_to_path(&first.cart)
+                    .or_else(|| if first.cart.starts_with('/') { Some(first.cart.clone()) } else { None });
+
+                // Update now-playing.
+                p.now.title = title.clone();
+                p.now.artist = artist.clone();
+                p.now.dur = dur_s;
+                p.now.pos = 0;
+
+                (first.id, title, artist, dur_s, path_opt)
+            }
+        };
+
+        // If we don't have a playable path, write silence and retry.
+        let Some(path) = path_opt else {
+            interval.tick().await;
+            stdin.write_all(&silence).await?;
+            continue;
+        };
+
+        tracing::info!("playout start: {} - {} ({})", artist, title, path);
+
+        // Start decoder and stream PCM to encoder stdin.
+        let (_child, mut dec_stdout) = match spawn_ffmpeg_decoder(&path).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("decoder spawn failed for {path}: {e}");
+                interval.tick().await;
+                stdin.write_all(&silence).await?;
+                continue;
+            }
+        };
+
+        let mut buf = vec![0u8; CHUNK_BYTES];
+        let mut frames_played: u64 = 0;
+
+        loop {
+            let n = dec_stdout.read(&mut buf).await?;
+            if n == 0 {
+                break;
+            }
+
+            interval.tick().await;
+            stdin.write_all(&buf[..n]).await?;
+
+            frames_played += (n as u64) / (BYTES_PER_FRAME as u64);
+            let pos_s = (frames_played / (SR as u64)) as u32;
+
+            // Update pos occasionally (cheap).
+            if frames_played % (SR as u64) < (FRAMES as u64) {
+                let mut p = playout.write().await;
+                p.now.pos = pos_s;
+            }
+        }
+
+        tracing::info!("playout end: {} - {}", artist, title);
+
+        // Advance the queue if the currently playing id still matches log[0].
+        let mut snapshot_to_persist: Option<Vec<LogItem>> = None;
+        {
+            let mut p = playout.write().await;
+            if !p.log.is_empty() && p.log[0].id == id {
+                p.log.remove(0);
+                normalize_queue_states(&mut p.log);
+
+                if let Some(first) = p.log.get(0) {
+                    p.now.title = first.title.clone();
+                    p.now.artist = first.artist.clone();
+                    p.now.dur = parse_dur_seconds(&first.dur).unwrap_or(0);
+                    p.now.pos = 0;
+                } else {
+                    p.now.pos = 0;
+                }
+
+                // Top-up if configured and queue is getting low.
+                let cfg = topup.lock().await.clone();
+                topup_if_needed(&mut p.log, &cfg).await;
+
+                snapshot_to_persist = Some(p.log.clone());
+            }
+        }
+        if let Some(log) = snapshot_to_persist {
+            persist_queue(log).await;
+        }
+
+        // If the queue is empty after advancing, continue producing silence.
     }
 }
