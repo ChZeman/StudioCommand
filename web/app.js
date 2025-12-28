@@ -289,11 +289,12 @@ if(state.flashArmed && Array.isArray(state.flashPrevOrder) && state.flashPrevOrd
 
     // Live VU meters (derived from PCM in the engine)
     if(data.vu && typeof data.vu === "object"){
-      vu.l = clamp01(Number(data.vu.rms_l || 0) || 0);
-      vu.r = clamp01(Number(data.vu.rms_r || 0) || 0);
-      vu.lpk = clamp01(Number(data.vu.peak_l || 0) || 0);
-      vu.rpk = clamp01(Number(data.vu.peak_r || 0) || 0);
-      setVuUI();
+      updateVuRaw(
+        Number(data.vu.rms_l || 0) || 0,
+        Number(data.vu.rms_r || 0) || 0,
+        Number(data.vu.peak_l || 0) || 0,
+        Number(data.vu.peak_r || 0) || 0,
+      );
     }
 
     // Producers: the API uses a slightly different field naming than the DEMO tiles.
@@ -366,11 +367,12 @@ async function fetchMeters(){
     if(!ct.includes("application/json")) throw new Error("Non-JSON meters");
     const data = await r.json();
     if(data && typeof data === "object"){
-      vu.l = clamp01(Number(data.rms_l || 0) || 0);
-      vu.r = clamp01(Number(data.rms_r || 0) || 0);
-      vu.lpk = clamp01(Number(data.peak_l || 0) || 0);
-      vu.rpk = clamp01(Number(data.peak_r || 0) || 0);
-      setVuUI();
+      updateVuRaw(
+        Number(data.rms_l || 0) || 0,
+        Number(data.rms_r || 0) || 0,
+        Number(data.peak_l || 0) || 0,
+        Number(data.peak_r || 0) || 0,
+      );
     }
   }catch(_e){
     // Ignore meter errors; /status drives LIVE/DEMO state.
@@ -1030,13 +1032,85 @@ function advanceQueue(reason){
 }
 
 
-// VU meter simulation (demo only)
-let vu = { l: 0.15, r: 0.18, lpk: 0.25, rpk: 0.28 };
+// VU meters
+// The engine provides raw RMS/Peak values. The UI applies "ballistics" so meters feel
+// responsive (fast attack) while remaining readable (controlled decay / peak hold).
+let vu = {
+  // Raw targets (from engine or demo generator)
+  raw_l: 0.15,
+  raw_r: 0.18,
+  raw_lpk: 0.25,
+  raw_rpk: 0.28,
+
+  // Displayed values (after UI ballistics)
+  l: 0.15,
+  r: 0.18,
+  lpk: 0.25,
+  rpk: 0.28,
+
+  // Peak hold (ms)
+  holdLUntil: 0,
+  holdRUntil: 0,
+
+  // Last update time for ballistics
+  lastMs: 0,
+};
 function clamp01(x){ return Math.max(0, Math.min(1, x)); }
 function vuToDb(x){
   // x in [0,1] -> roughly -60..0 dB
   const db = -60 + (x*x) * 60;
   return db;
+}
+
+function applyVuBallistics(nowMs){
+  // Default dt assumes meter polling interval if we don't have a prior timestamp.
+  if(!vu.lastMs) vu.lastMs = nowMs;
+  const dt = Math.max(0.001, Math.min(0.5, (nowMs - vu.lastMs) / 1000));
+  vu.lastMs = nowMs;
+
+  // RMS ballistics: fairly quick attack, slower release.
+  const tauAttack = 0.06;  // seconds
+  const tauRelease = 0.22; // seconds
+  const aA = 1 - Math.exp(-dt / tauAttack);
+  const aR = 1 - Math.exp(-dt / tauRelease);
+
+  function smoothRms(disp, raw){
+    const a = (raw > disp) ? aA : aR;
+    return disp + (raw - disp) * a;
+  }
+
+  vu.l = smoothRms(vu.l, vu.raw_l);
+  vu.r = smoothRms(vu.r, vu.raw_r);
+
+  // Peak ballistics: instant attack + short hold + fast decay.
+  const holdMs = 220;      // peak hold time
+  const tauPeakDecay = 0.18; // seconds
+  const aPk = 1 - Math.exp(-dt / tauPeakDecay);
+
+  // Left peak
+  if(vu.raw_lpk >= vu.lpk){
+    vu.lpk = vu.raw_lpk;
+    vu.holdLUntil = nowMs + holdMs;
+  } else if(nowMs >= vu.holdLUntil){
+    vu.lpk = Math.max(vu.lpk - vu.lpk * aPk, vu.raw_lpk);
+  }
+
+  // Right peak
+  if(vu.raw_rpk >= vu.rpk){
+    vu.rpk = vu.raw_rpk;
+    vu.holdRUntil = nowMs + holdMs;
+  } else if(nowMs >= vu.holdRUntil){
+    vu.rpk = Math.max(vu.rpk - vu.rpk * aPk, vu.raw_rpk);
+  }
+}
+
+function updateVuRaw(rmsL, rmsR, peakL, peakR){
+  vu.raw_l = clamp01(rmsL);
+  vu.raw_r = clamp01(rmsR);
+  vu.raw_lpk = clamp01(peakL);
+  vu.raw_rpk = clamp01(peakR);
+  applyVuBallistics(performance.now());
+  setVuUI();
 }
 function setVuUI(){
   const elL = qs("#vuL"), elR = qs("#vuR");
@@ -1052,21 +1126,18 @@ function setVuUI(){
 }
 function tickVu(){
   if(state.apiMode === "LIVE") return; // LIVE meters come from engine PCM analysis
-  // Random-ish program audio with smoothing and occasional peaks.
-  const base = 0.18 + Math.random()*0.28;  // average program level
+
+  // Random-ish program audio with occasional peaks.
+  const base = 0.18 + Math.random()*0.28;
   const bump = (Math.random() < 0.08) ? (0.25 + Math.random()*0.25) : 0;
   const targetL = clamp01(base + bump + (Math.random()-0.5)*0.08);
   const targetR = clamp01(base + bump + (Math.random()-0.5)*0.08);
 
-  // Smooth
-  vu.l = vu.l*0.78 + targetL*0.22;
-  vu.r = vu.r*0.78 + targetR*0.22;
+  // Treat these as "instantaneous" targets.
+  const pkL = Math.max(targetL, vu.raw_lpk*0.92);
+  const pkR = Math.max(targetR, vu.raw_rpk*0.92);
 
-  // Peak hold with decay
-  vu.lpk = Math.max(vu.lpk*0.98, vu.l);
-  vu.rpk = Math.max(vu.rpk*0.98, vu.r);
-
-  setVuUI();
+  updateVuRaw(targetL, targetR, pkL, pkR);
 }
 
 function tickNowPlaying(){
