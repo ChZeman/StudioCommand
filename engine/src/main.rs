@@ -968,6 +968,7 @@ async fn api_webrtc_offer(
 //   - CPU cost is negligible.
 //   - It dramatically improves connection reliability and debuggability.
 // ---------------------------------------------------------------------
+let stopped = std::sync::Arc::new(AtomicBool::new(false));
 let audio_started = std::sync::Arc::new(AtomicBool::new(false));
 {
     let track_for_silence = track.clone();
@@ -1019,8 +1020,6 @@ let audio_started = std::sync::Arc::new(AtomicBool::new(false));
     });
 }
 
-    // Stop flag used by the audio pump task.
-    let stopped = std::sync::Arc::new(AtomicBool::new(false));
     {
         let stopped = stopped.clone();
         pc.on_peer_connection_state_change(Box::new(move |s: RTCPeerConnectionState| {
