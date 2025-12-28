@@ -1418,8 +1418,13 @@ fn normalize_log_state(p: &mut PlayoutState){
         p.now.title = first.title.clone();
         p.now.artist = first.artist.clone();
         p.now.dur = parse_dur_to_sec(&first.dur);
-        // keep current position, but clamp to duration
-        if p.now.pos > p.now.dur { p.now.pos = 0; p.now.pos_f = 0.0; }
+        // Keep current position, but clamp only when duration is known.
+        // If dur is 0 (unknown), do NOT reset pos; that makes the UI progress bar
+        // creep forward and snap back to 0 every tick.
+        if p.now.dur > 0 && p.now.pos > p.now.dur {
+            p.now.pos = p.now.dur;
+            p.now.pos_f = p.now.dur as f64;
+        }
     }
 }
 

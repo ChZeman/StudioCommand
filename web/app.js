@@ -1477,7 +1477,9 @@ setApiBadge("DEMO");
 wireTransportControls();
 wireStreamingControls();
 fetchStatus();
-setInterval(fetchStatus, 1000);
+// Poll status more frequently in LIVE mode so meters/progress feel responsive.
+// (The payload is small; this also avoids "stale"-looking VU updates.)
+setInterval(fetchStatus, 250);
 renderApiBadge();
 wireUI();
 wireLogDelegatedHandlers();

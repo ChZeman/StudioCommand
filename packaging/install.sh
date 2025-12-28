@@ -132,6 +132,11 @@ nginx -t
 systemctl enable --now nginx
 systemctl reload nginx
 
+# Ensure the newly installed engine is running.
+# (If the service was already running, enable --now does not restart it.)
+echo "[*] Restarting studiocommand"
+systemctl restart studiocommand.service || true
+
 echo
 echo "[✓] Installed."
 echo "    Engine (internal):  http://127.0.0.1:3000"
