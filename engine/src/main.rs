@@ -1053,13 +1053,27 @@ let audio_started = std::sync::Arc::new(AtomicBool::new(false));
         tracing::warn!("webrtc: create_answer failed: {e}");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
-    // NOTE: We intentionally do NOT wait for ICE gathering to complete here.
-    // WebRTC supports "trickle ICE" where candidates arrive after the SDP answer.
-    // Waiting for gathering can cause long stalls or timeouts in some environments.
-    pc.set_local_description(answer).await.map_err(|e| {
-        tracing::warn!("webrtc: set_local_description failed: {e}");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    // IMPORTANT: We return a *non-trickle* SDP answer (all ICE candidates included in the SDP).
+//
+// In early WebRTC iterations we returned the SDP immediately after `set_local_description()`.
+// That can produce an SDP answer with *zero* candidates in some environments, causing the browser to
+// remain stuck in ICE state `new` (no remote candidates) and eventually give up.
+//
+// Full trickle ICE would require a candidate exchange endpoint and client-side event wiring.
+// For StudioCommand’s "Listen Live" monitor, a simpler and robust approach is:
+//   1) set the local description
+//   2) wait *briefly* for ICE gathering to complete (bounded, so we never stall forever)
+//   3) read the final local description (now containing candidates) and return it as the SDP answer
+pc.set_local_description(answer).await.map_err(|e| {
+    tracing::warn!("webrtc: set_local_description failed: {e}");
+    StatusCode::INTERNAL_SERVER_ERROR
+})?;
+
+// Wait up to 2 seconds for ICE gathering to complete so the returned SDP includes candidates.
+// If it times out, we still proceed (and the UI will show `new`/`checking`).
+let mut gather_complete = pc.gathering_complete_promise().await;
+let _ = tokio::time::timeout(std::time::Duration::from_secs(2), gather_complete.recv()).await;
+
     let local = pc.local_description().await.ok_or_else(|| {
         tracing::warn!("webrtc: local_description missing after set_local_description");
         StatusCode::INTERNAL_SERVER_ERROR
