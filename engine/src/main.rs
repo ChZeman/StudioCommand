@@ -1317,17 +1317,34 @@ async fn api_queue_insert(
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     // Insert a cart after a given index (e.g., after "next" => after=1).
     let mut p = state.playout.write().await;
-    let after = req.after.min(p.log.len().saturating_sub(1));
-    let ins = LogItem{ id: Uuid::new_v4(),
-        tag: req.item.tag,
-        time: "--:--".into(),
-        title: req.item.title,
-        artist: req.item.artist,
-        state: "queued".into(),
-        dur: req.item.dur,
-        cart: req.item.cart,
-    };
-    p.log.insert(after+1, ins);
+    // Handle truly-empty queues: inserting at index 1 would panic.
+    // In that case, the first inserted item becomes "playing".
+    if p.log.is_empty() {
+        let ins = LogItem {
+            id: Uuid::new_v4(),
+            tag: req.item.tag,
+            time: "--:--".into(),
+            title: req.item.title,
+            artist: req.item.artist,
+            state: "playing".into(),
+            dur: req.item.dur,
+            cart: req.item.cart,
+        };
+        p.log.push(ins);
+    } else {
+        let after = req.after.min(p.log.len().saturating_sub(1));
+        let ins = LogItem {
+            id: Uuid::new_v4(),
+            tag: req.item.tag,
+            time: "--:--".into(),
+            title: req.item.title,
+            artist: req.item.artist,
+            state: "queued".into(),
+            dur: req.item.dur,
+            cart: req.item.cart,
+        };
+        p.log.insert(after + 1, ins);
+    }
     normalize_log_state(&mut p);
 
     // Persist the updated queue so restarts keep the same order.
@@ -1594,16 +1611,17 @@ fn scan_audio_files_recursive(dir: &str) -> anyhow::Result<Vec<String>> {
     Ok(out)
 }
 
-async fn topup_if_needed(log: &mut Vec<LogItem>, cfg: &TopUpConfig) {
+// Returns true if the queue was modified (items appended).
+async fn topup_if_needed(log: &mut Vec<LogItem>, cfg: &TopUpConfig) -> bool {
     if !cfg.enabled {
-        return;
+        return false;
     }
     if cfg.dir.trim().is_empty() {
-        return;
+        return false;
     }
 
     if log.len() as u16 >= cfg.min_queue {
-        return;
+        return false;
     }
 
     let dir = cfg.dir.clone();
@@ -1613,17 +1631,17 @@ async fn topup_if_needed(log: &mut Vec<LogItem>, cfg: &TopUpConfig) {
         Ok(Ok(v)) => v,
         Ok(Err(e)) => {
             tracing::warn!("top-up scan failed: {e}");
-            return;
+            return false;
         }
         Err(e) => {
             tracing::warn!("top-up scan join failed: {e}");
-            return;
+            return false;
         }
     };
 
     if files.is_empty() {
         tracing::warn!("top-up dir had no audio files: {}", cfg.dir);
-        return;
+        return false;
     }
 
     // Pick random unique files.
@@ -1651,6 +1669,7 @@ async fn topup_if_needed(log: &mut Vec<LogItem>, cfg: &TopUpConfig) {
 
     normalize_queue_states(log);
     tracing::info!("top-up appended {} items from {}", picked.len(), cfg.dir);
+    true
 }
 
 async fn writer_playout(
@@ -1665,8 +1684,29 @@ async fn writer_playout(
 
     let silence = make_silence_chunk(FRAMES);
     let mut interval = tokio::time::interval(std::time::Duration::from_millis(20));
+    // Avoid hammering the filesystem when we're idling on silence.
+    let mut last_topup_check = std::time::Instant::now() - std::time::Duration::from_secs(10);
 
     loop {
+        // If output is running but the queue is empty/low, top-up must still run.
+        // (In v0.1.42 it only ran after an end-of-track advance, so an empty queue
+        // would idle on silence forever.)
+        if last_topup_check.elapsed() >= std::time::Duration::from_secs(2) {
+            last_topup_check = std::time::Instant::now();
+
+            let cfg = topup.lock().await.clone();
+            let mut snapshot_to_persist: Option<Vec<LogItem>> = None;
+            {
+                let mut p = playout.write().await;
+                if topup_if_needed(&mut p.log, &cfg).await {
+                    snapshot_to_persist = Some(p.log.clone());
+                }
+            }
+            if let Some(log) = snapshot_to_persist {
+                persist_queue(log).await;
+            }
+        }
+
         // Determine current track (log[0]) and resolve its path.
         let (id, title, artist, dur_s, path_opt) = {
             let mut p = playout.write().await;
@@ -1772,7 +1812,7 @@ async fn writer_playout(
 
                 // Top-up if configured and queue is getting low.
                 let cfg = topup.lock().await.clone();
-                topup_if_needed(&mut p.log, &cfg).await;
+                let _ = topup_if_needed(&mut p.log, &cfg).await;
 
                 snapshot_to_persist = Some(p.log.clone());
             }
