@@ -22,6 +22,8 @@ use sysinfo::System;
 use tracing::{info, warn};
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
+use tokio::io::{AsyncBufReadExt, BufReader};
+use std::collections::VecDeque;
 
 #[derive(Clone)]
 struct AppState {
@@ -64,6 +66,8 @@ struct OutputRuntime {
     status: StreamOutputStatus,
     ffmpeg_child: Option<tokio::process::Child>,
     writer_task: Option<tokio::task::JoinHandle<()>>,
+    stderr_task: Option<tokio::task::JoinHandle<()>>,
+    stderr_tail: VecDeque<String>,
     started_at: Option<std::time::Instant>,
 }
 
@@ -80,6 +84,8 @@ impl OutputRuntime {
             config,
             ffmpeg_child: None,
             writer_task: None,
+            stderr_task: None,
+            stderr_tail: VecDeque::with_capacity(80),
             started_at: None,
         }
     }
@@ -718,6 +724,56 @@ fn read_temp_c() -> anyhow::Result<Option<f32>> {
 
 // --- Output API (Icecast) -------------------------------------------------
 
+fn sanitize_ffmpeg_line(line: &str, password: &str) -> String {
+    // Best-effort redaction. We never want to leak credentials into UI/logs.
+    // ffmpeg typically doesn't echo full URLs at loglevel=error, but it can.
+    let mut s = line.to_string();
+    if !password.is_empty() {
+        s = s.replace(password, "****");
+    }
+    // Also redact any Basic auth header content if it appears.
+    if s.to_ascii_lowercase().contains("authorization:") {
+        return "Authorization: ****".to_string();
+    }
+    s
+}
+
+fn push_stderr_tail(o: &mut OutputRuntime, line: String) {
+    const MAX: usize = 80;
+    if o.stderr_tail.len() >= MAX {
+        o.stderr_tail.pop_front();
+    }
+    o.stderr_tail.push_back(line.clone());
+
+    // If ffmpeg emits a clear HTTP/auth/config error, surface it immediately.
+    let lc = line.to_ascii_lowercase();
+    if lc.contains("unauthorized") || lc.contains("forbidden") || lc.contains("not found") || lc.contains("server returned") {
+        o.status.state = "error".into();
+        o.status.last_error = Some(line);
+    }
+}
+
+fn last_stderr_summary(tail: &VecDeque<String>) -> Option<String> {
+    // Prefer the last non-empty, non-noisy line.
+    for line in tail.iter().rev() {
+        let t = line.trim();
+        if t.is_empty() {
+            continue;
+        }
+        // Skip repetitive/low-signal lines.
+        let lc = t.to_ascii_lowercase();
+        if lc.contains("broken pipe") {
+            continue;
+        }
+        if lc.contains("conversion failed") {
+            continue;
+        }
+        return Some(t.to_string());
+    }
+    // Fall back to the last line if that's all we have.
+    tail.back().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
 #[derive(Serialize)]
 struct OutputGetResponse {
     config: StreamOutputConfig,
@@ -733,12 +789,20 @@ async fn api_output_get(State(state): State<AppState>) -> Json<OutputGetResponse
             Ok(Some(es)) => {
                 o.ffmpeg_child = None;
                 o.started_at = None;
+                if let Some(task) = o.stderr_task.take() {
+                    task.abort();
+                }
                 o.status.uptime_sec = 0;
                 if es.success() {
                     o.status.state = "stopped".into();
                 } else {
                     o.status.state = "error".into();
-                    o.status.last_error = Some(format!("ffmpeg exited: {es}"));
+                    // Prefer the last meaningful stderr line for operator visibility.
+                    if let Some(tail) = last_stderr_summary(&o.stderr_tail) {
+                        o.status.last_error = Some(tail);
+                    } else {
+                        o.status.last_error = Some(format!("ffmpeg exited: {es}"));
+                    }
                 }
             }
             Ok(None) => {}
@@ -818,7 +882,7 @@ async fn output_start_internal(output: Arc<tokio::sync::Mutex<OutputRuntime>>) -
     }
 
     // Spawn ffmpeg and a simple audio generator to prove end-to-end streaming.
-    let (mut child, stdin) = spawn_ffmpeg_icecast(&o.config).await.map_err(|e| {
+    let (mut child, stdin, stderr) = spawn_ffmpeg_icecast(&o.config).await.map_err(|e| {
         o.status.state = "error".into();
         o.status.last_error = Some(e.to_string());
         StatusCode::INTERNAL_SERVER_ERROR
@@ -839,9 +903,26 @@ async fn output_start_internal(output: Arc<tokio::sync::Mutex<OutputRuntime>>) -
         }
     });
 
+    // Capture ffmpeg stderr so the UI can show actionable errors (e.g. 401 Unauthorized)
+    // without exposing secrets.
+    let output_for_stderr = output.clone();
+    let password = o.config.password.clone();
+    let stderr_task = tokio::spawn(async move {
+        let mut lines = BufReader::new(stderr).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            let sanitized = sanitize_ffmpeg_line(&line, &password);
+            if sanitized.trim().is_empty() {
+                continue;
+            }
+            let mut o = output_for_stderr.lock().await;
+            push_stderr_tail(&mut o, sanitized);
+        }
+    });
+
     // Put child + task into runtime.
     o.ffmpeg_child = Some(child);
     o.writer_task = Some(writer_task);
+    o.stderr_task = Some(stderr_task);
 
     // Optimistically mark connected after a short grace period if ffmpeg is still alive.
     drop(o);
@@ -866,12 +947,16 @@ async fn output_stop_internal(output: Arc<tokio::sync::Mutex<OutputRuntime>>) {
         task.abort();
     }
 
+    if let Some(task) = o.stderr_task.take() {
+        task.abort();
+    }
+
     o.started_at = None;
     o.status.uptime_sec = 0;
     o.status.state = "stopped".into();
 }
 
-async fn spawn_ffmpeg_icecast(cfg: &StreamOutputConfig) -> anyhow::Result<(tokio::process::Child, tokio::process::ChildStdin)> {
+async fn spawn_ffmpeg_icecast(cfg: &StreamOutputConfig) -> anyhow::Result<(tokio::process::Child, tokio::process::ChildStdin, tokio::process::ChildStderr)> {
     let ffmpeg = std::env::var("STUDIOCOMMAND_FFMPEG").unwrap_or_else(|_| "ffmpeg".to_string());
 
     // Important: never log the password.
@@ -918,7 +1003,8 @@ async fn spawn_ffmpeg_icecast(cfg: &StreamOutputConfig) -> anyhow::Result<(tokio
 
     let mut child = cmd.spawn()?;
     let stdin = child.stdin.take().ok_or_else(|| anyhow::anyhow!("ffmpeg stdin unavailable"))?;
-    Ok((child, stdin))
+    let stderr = child.stderr.take().ok_or_else(|| anyhow::anyhow!("ffmpeg stderr unavailable"))?;
+    Ok((child, stdin, stderr))
 }
 
 async fn writer_sine_wave(mut stdin: tokio::process::ChildStdin) -> anyhow::Result<()> {
