@@ -10,7 +10,7 @@ const TARGET_LOG_LEN = 12;
 
 // NOTE: UI_VERSION is purely informational (tooltip on the header).
 // The authoritative running version is exposed by the backend at /api/v1/status.
-const UI_VERSION = "0.1.66";
+const UI_VERSION = "0.1.67";
 
 const state = {
   role: "operator",
@@ -1502,7 +1502,8 @@ function wireUI(){
   // - Starts Listen Live if it's not already running
   const liveBtn = qs("#btnLiveAudio");
   if(liveBtn) liveBtn.onclick = () => {
-    openDrawer("monitors");
+    // Start WebRTC audio without forcing the Monitors drawer open.
+    // Operators often keep the right side visible and prefer the drawer to stay out of the way.
     startListenLive().catch(err => {
       toast(`Listen Live failed: ${err.message || String(err)}`);
       stopListenLive();

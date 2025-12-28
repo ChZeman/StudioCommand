@@ -371,7 +371,6 @@ kbd{
 }
 .drawer-bottom{
   left:14px; right:14px; bottom:14px;
-  height:330px;
   border-radius: var(--radius2);
   transform: translateY(110%);
   transition: transform .18s ease;
@@ -510,3 +509,12 @@ button.mini:disabled{ opacity: .35; cursor: default; }
 .meta span{margin-right:12px;}
 .meta span:last-child{margin-right:0;}
 .meta span:nth-child(3), .meta span:nth-child(4){font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size: 12px; opacity: 0.85;}
+
+
+/* v0.1.67: Right-rail layout improvements */
+.panel.right{
+  display:flex;
+  flex-direction:column;
+}
+/* Keep the Control Panel bottom-aligned in the right rail. */
+.panel.right .control-panel{margin-top:auto;}
