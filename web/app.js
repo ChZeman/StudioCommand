@@ -354,6 +354,29 @@ if(state.flashArmed && Array.isArray(state.flashPrevOrder) && state.flashPrevOrd
 	// end fetchStatus
 }
 
+// Fast VU meter polling (LIVE only).
+// Separate from /api/v1/status so meters stay responsive without re-fetching
+// the full status payload at high frequency.
+async function fetchMeters(){
+  if(state.apiMode !== "LIVE") return;
+  try{
+    const r = await fetch("/api/v1/meters", { cache: "no-store" });
+    if(!r.ok) throw new Error(`HTTP ${r.status}`);
+    const ct = (r.headers.get("content-type") || "").toLowerCase();
+    if(!ct.includes("application/json")) throw new Error("Non-JSON meters");
+    const data = await r.json();
+    if(data && typeof data === "object"){
+      vu.l = clamp01(Number(data.rms_l || 0) || 0);
+      vu.r = clamp01(Number(data.rms_r || 0) || 0);
+      vu.lpk = clamp01(Number(data.peak_l || 0) || 0);
+      vu.rpk = clamp01(Number(data.peak_r || 0) || 0);
+      setVuUI();
+    }
+  }catch(_e){
+    // Ignore meter errors; /status drives LIVE/DEMO state.
+  }
+}
+
 async function fetchOutput(){
   try{
     const r = await fetch("/api/v1/output", { cache: "no-store" });
@@ -1479,7 +1502,10 @@ wireStreamingControls();
 fetchStatus();
 // Poll status more frequently in LIVE mode so meters/progress feel responsive.
 // (The payload is small; this also avoids "stale"-looking VU updates.)
-setInterval(fetchStatus, 250);
+// Status is relatively heavy; poll it slowly.
+setInterval(fetchStatus, 1000);
+// Meters are tiny; poll them fast for responsive UI.
+setInterval(fetchMeters, 120);
 renderApiBadge();
 wireUI();
 wireLogDelegatedHandlers();

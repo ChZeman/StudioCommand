@@ -642,6 +642,8 @@ fn build_router(state: AppState) -> Router {
         .route("/", get(root))
         .route("/health", get(|| async { "OK" }))
         .route("/api/v1/status", get(status))
+        // Lightweight endpoint for high-rate meter polling.
+        .route("/api/v1/meters", get(meters))
         .route("/api/v1/ping", get(ping))
         .route("/api/v1/system/info", get(system_info))
         .route("/api/v1/output", get(api_output_get))
@@ -783,6 +785,13 @@ async fn status(State(state): State<AppState>) -> Json<StatusResponse> {
         producers: p.producers.clone(),
         system,
     })
+}
+
+// High-rate meter polling endpoint. Keep it tiny so it stays responsive even
+// over higher-latency connections.
+async fn meters(State(state): State<AppState>) -> Json<VuLevels> {
+    let p = state.playout.read().await;
+    Json(p.vu.clone())
 }
 #[derive(Serialize)]
 struct SystemInfo {
