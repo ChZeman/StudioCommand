@@ -10,7 +10,7 @@ const TARGET_LOG_LEN = 12;
 
 // NOTE: UI_VERSION is purely informational (tooltip on the header).
 // The authoritative running version is exposed by the backend at /api/v1/status.
-const UI_VERSION = "0.1.64";
+const UI_VERSION = "0.1.65";
 
 const state = {
   role: "operator",
@@ -80,6 +80,15 @@ const state = {
   listenLiveMeters: {
     dcActive: false,
     lastDcAt: 0,
+  },
+
+  // Meter telemetry (v0.1.65)
+  // We track where the *most recent* meter frame came from so the operator can
+  // see, at a glance, whether they are looking at WebRTC-aligned meters or the
+  // fallback HTTP polling stream.
+  meters: {
+    lastAt: 0,       // ms epoch of last meter update (any source)
+    source: "",      // "DataChannel" | "HTTP" | "" (unknown)
   },
 };
 
@@ -383,6 +392,9 @@ async function fetchMeters(){
     if(!ct.includes("application/json")) throw new Error("Non-JSON meters");
     const data = await r.json();
     if(data && typeof data === "object"){
+      // Meter telemetry: an HTTP poll produced a valid frame.
+      state.meters.lastAt = Date.now();
+      state.meters.source = "HTTP";
       updateVuRaw(
         Number(data.rms_l || 0) || 0,
         Number(data.rms_r || 0) || 0,
@@ -1156,6 +1168,44 @@ function tickVu(){
   updateVuRaw(targetL, targetR, pkL, pkR);
 }
 
+// Listen Live meter-source indicator (v0.1.65)
+//
+// The operator cares about two things:
+//   1) Are the meters sourced from WebRTC (DataChannel) or HTTP polling?
+//   2) How old is the most recent meter frame?
+//
+// We keep this in a lightweight tick instead of the main render loop because
+// meters may update more frequently than the 1s /api/v1/status poll.
+function tickListenLiveUi(){
+  const srcEl = qs("#mListenMeters");
+  const ageEl = qs("#mListenMeterAge");
+  if(!srcEl || !ageEl) return;
+
+  // If we have never seen a meter frame, keep the UI neutral.
+  if(!state.meters.lastAt){
+    srcEl.textContent = "-";
+    ageEl.textContent = "-";
+    return;
+  }
+
+  const ageMs = Date.now() - state.meters.lastAt;
+  const ageS = Math.max(0, Math.round(ageMs/100)/10); // 0.1s precision
+
+  // If Listen Live is active and the data channel is currently fresh, mark it.
+  const dcFresh = state.listenLiveMeters.dcActive && (Date.now() - state.listenLiveMeters.lastDcAt) < 2000;
+
+  // Prefer the explicit source label, but if the DC is fresh we treat it as DC.
+  const src = dcFresh ? "DataChannel" : (state.meters.source || "-");
+
+  srcEl.textContent = src;
+  ageEl.textContent = `${ageS}s`;
+
+  // Small UX hint: if the data channel is stale, we add a subtle muted style.
+  // (CSS already defines .muted; we just toggle it to communicate confidence.)
+  srcEl.classList.toggle("muted", src !== "DataChannel");
+  ageEl.classList.toggle("muted", ageMs > 1500);
+}
+
 function tickNowPlaying(){
   // When connected to the engine API, we do not advance the clock locally.
   // The engine is the source of truth, but we *interpolate* between 1s polls
@@ -1332,6 +1382,12 @@ function wireUI(){
         try{
           const msg = JSON.parse(ev.data);
           state.listenLiveMeters.lastDcAt = Date.now();
+
+          // Meter telemetry: a data-channel frame was successfully received.
+          // This is the *preferred* source while Listen Live is active.
+          state.meters.lastAt = state.listenLiveMeters.lastDcAt;
+          state.meters.source = "DataChannel";
+
           updateVuRaw(
             Number(msg.rms_l || 0) || 0,
             Number(msg.rms_r || 0) || 0,
@@ -1785,6 +1841,10 @@ fetchStatus();
 setInterval(fetchStatus, 1000);
 // Meters are tiny; poll them fast for responsive UI.
 setInterval(fetchMeters, 120);
+
+// Listen Live (WebRTC) meter-source indicator.
+// This tick is UI-only and safe in both DEMO and LIVE modes.
+setInterval(tickListenLiveUi, 200);
 renderApiBadge();
 wireUI();
 wireLogDelegatedHandlers();
