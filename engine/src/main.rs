@@ -618,10 +618,11 @@ let state = AppState {
     let out = state.output.clone();
     let pl = state.playout.clone();
     let tu = state.topup.clone();
+		let pcm_tx = state.pcm_tx.clone();
     let enabled = out.lock().await.config.enabled;
     if enabled {
         tokio::spawn(async move {
-            let _ = output_start_internal(out, pl, tu).await;
+				let _ = output_start_internal(out, pl, tu, pcm_tx).await;
         });
     }
 }
@@ -889,12 +890,19 @@ async fn api_webrtc_offer(
         })?;
 
     let mut registry = webrtc::interceptor::registry::Registry::new();
-    registry = register_default_interceptors(registry, &mut m)
-        .await
-        .map_err(|e| {
-            tracing::warn!("webrtc: register_default_interceptors failed: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+
+    // NOTE: In webrtc-rs, `register_default_interceptors(...)` is *synchronous* and returns
+    // `Result<Registry, webrtc::Error>`.
+    //
+    // Earlier drafts of this feature assumed an async API and incorrectly used `.await`.
+    // That fails to compile with:
+    //   "Result<...> is not a future"
+    //
+    // Keeping this explicit (and documented) helps future upgrades if the upstream API changes.
+    registry = register_default_interceptors(registry, &mut m).map_err(|e| {
+        tracing::warn!("webrtc: register_default_interceptors failed: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     let api = APIBuilder::new()
         .with_media_engine(m)
@@ -951,8 +959,7 @@ async fn api_webrtc_offer(
                 stopped.store(true, Ordering::Relaxed);
             }
             Box::pin(async {})
-        }))
-        .await;
+        }));
     }
 
     // --- SDP handshake ----------------------------------------------------

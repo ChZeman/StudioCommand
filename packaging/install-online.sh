@@ -40,7 +40,7 @@ VERSION=""           # e.g. v0.1.0
 DOMAIN=""            # required
 EMAIL=""             # optional; enables Let's Encrypt
 NONINTERACTIVE="false"
-NO_DEPS="false"        # set true to skip installing OS dependencies (e.g. ffmpeg)
+NO_DEPS="false"        # set true to skip installing OS dependencies (ffmpeg, opus headers, etc.)
 
 
 detect_default_domain() {
@@ -68,7 +68,7 @@ Usage:
   sudo $0 --domain <host> [--email <email>] [--version <tag>] [--noninteractive] [--no-deps]
 
 Options:
-  --no-deps        Skip installing OS dependencies (ffmpeg). You must install them yourself.
+  --no-deps        Skip installing OS dependencies (ffmpeg, opus headers, etc.). You must install them yourself.
 
 Examples:
   sudo $0 --domain studiocommand.example.org --email admin@example.org
@@ -137,33 +137,56 @@ if ! command -v curl >/dev/null 2>&1; then
   apt-get install -y curl
 fi
 
-# Ensure streaming dependencies (ffmpeg) exist. Debian 13+ uses apt.
-ensure_streaming_deps() {
+###############################################################################
+# OS dependency installation
+#
+# StudioCommand ships prebuilt binaries, but the *build pipeline* (GitHub Actions)
+# and some optional features rely on native packages.
+#
+# - ffmpeg is required for Icecast MP3/AAC streaming.
+# - libopus-dev + pkg-config are required to compile the WebRTC "Listen Live"
+#   monitor (opus encoder bindings) in CI and for any on-host builds.
+# - jq is used by this installer when calling the GitHub Releases API.
+###############################################################################
+
+ensure_os_deps() {
   if [[ "${NO_DEPS}" == "true" ]]; then
     echo "[*] Skipping dependency installation (--no-deps)."
     return 0
   fi
 
-  if command -v ffmpeg >/dev/null 2>&1; then
-    echo "[*] Dependency ok: ffmpeg found."
-    return 0
-  fi
-
-  echo "[*] ffmpeg not found; installing (required for Icecast MP3/AAC streaming)"
-  if command -v apt-get >/dev/null 2>&1; then
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get update
-    apt-get install -y ffmpeg
-  else
-    echo "ERROR: ffmpeg not found and apt-get is not available. Please install ffmpeg manually."
+  if ! command -v apt-get >/dev/null 2>&1; then
+    echo "ERROR: apt-get is not available. Please install required dependencies manually."
     return 1
   fi
 
-  if ! command -v ffmpeg >/dev/null 2>&1; then
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update
+
+  # Always install these small, low-risk tools if missing.
+  # (idempotent: apt-get will no-op if already present)
+  apt-get install -y ca-certificates curl jq pkg-config
+
+  # WebRTC Listen Live (build dependency)
+  apt-get install -y libopus-dev
+
+  # Icecast streaming (runtime dependency)
+  apt-get install -y ffmpeg
+
+  # Sanity checks with friendly messages.
+  if command -v ffmpeg >/dev/null 2>&1; then
+    echo "[*] Dependency ok: ffmpeg found."
+  else
     echo "ERROR: ffmpeg install did not succeed."
     return 1
   fi
-  echo "[*] Dependency installed: ffmpeg"
+
+  if dpkg -s libopus-dev >/dev/null 2>&1; then
+    echo "[*] Dependency ok: libopus-dev installed."
+  else
+    echo "ERROR: libopus-dev install did not succeed."
+    return 1
+  fi
 }
 
 post_install_check() {
@@ -249,7 +272,7 @@ fi
 
 echo
 echo "StudioCommand install plan:"
-ensure_streaming_deps
+ensure_os_deps
 
 echo "  - Version:       ${VERSION} (normalized: ${VERSION_NO_V})"
 echo "  - Architecture:  ${ARCH}"
