@@ -1809,8 +1809,8 @@ async fn topup_if_needed(log: &mut Vec<LogItem>, cfg: &TopUpConfig) -> bool {
             title: title_from_path(path),
             artist: "TopUp".into(),
             state: "queued".into(),
-            dur: "0:00".into(),
-            cart: path.clone(), // absolute path
+            dur: dur.clone(),
+            cart: path.to_string(), // absolute path
         });
     }
 
@@ -1947,11 +1947,11 @@ loop {
 
         let mut p = playout.write().await;
         // RMS smoothing (slower).
-        p.vu.rms_l = smooth_level(p.vu.rms_l, inst.rms_l, 0.20, 0.06);
-        p.vu.rms_r = smooth_level(p.vu.rms_r, inst.rms_r, 0.20, 0.06);
+        p.vu.rms_l = smooth_level(p.vu.rms_l, inst.rms_l, 0.75, 0.25);
+        p.vu.rms_r = smooth_level(p.vu.rms_r, inst.rms_r, 0.75, 0.25);
         // Peak smoothing (faster attack, slower decay).
-        p.vu.peak_l = smooth_level(p.vu.peak_l, inst.peak_l, 0.45, 0.10);
-        p.vu.peak_r = smooth_level(p.vu.peak_r, inst.peak_r, 0.45, 0.10);
+        p.vu.peak_l = smooth_level(p.vu.peak_l, inst.peak_l, 0.90, 0.35);
+        p.vu.peak_r = smooth_level(p.vu.peak_r, inst.peak_r, 0.90, 0.35);
     }
 }
 

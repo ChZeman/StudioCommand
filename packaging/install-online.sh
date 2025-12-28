@@ -309,3 +309,12 @@ fi
 post_install_check
 echo
 echo "[✓] Done. Open: https://${DOMAIN}:${PUBLIC_HTTPS_PORT}"
+
+# Ensure service is running with the newly installed binaries
+if command -v systemctl >/dev/null 2>&1; then
+  if systemctl list-unit-files | grep -q '^studiocommand\.service'; then
+    echo "[install-online] restarting studiocommand..."
+    systemctl daemon-reload || true
+    systemctl restart studiocommand || true
+  fi
+fi
