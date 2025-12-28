@@ -945,6 +945,80 @@ async fn api_webrtc_offer(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
+// ---------------------------------------------------------------------
+// WebRTC "keepalive" audio packets (Opus silence)
+//
+// Symptom this fixes:
+//   The browser shows "Connecting..." for a while and then returns to "Stopped"
+//   without ever reaching "Connected".
+//
+// Cause:
+//   Some browsers will tear down a PeerConnection if no RTP media arrives soon
+//   after ICE/DTLS completes. This is especially easy to trigger in broadcast
+//   scenarios where the "real" audio pipeline might take a moment to start,
+//   or when the server has not yet received any PCM frames.
+//
+// Fix:
+//   Immediately begin sending tiny 20 ms Opus packets that decode to silence.
+//   As soon as the real PCM->Opus pump successfully writes its first packet,
+//   it flips `audio_started` to true and this silence task exits.
+//
+// Notes:
+//   - This is a common WebRTC broadcasting practice.
+//   - CPU cost is negligible.
+//   - It dramatically improves connection reliability and debuggability.
+// ---------------------------------------------------------------------
+let audio_started = std::sync::Arc::new(AtomicBool::new(false));
+{
+    let track_for_silence = track.clone();
+    let stopped = stopped.clone();
+    let audio_started = audio_started.clone();
+
+    tokio::spawn(async move {
+        use std::time::Duration;
+
+        // A dedicated Opus encoder for the silence stream.
+        // We encode 20 ms of all-zero PCM (stereo, 48 kHz).
+        let mut enc = match OpusEncoder::new(48_000, OpusChannels::Stereo, OpusApplication::Audio) {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!("webrtc: failed to create Opus encoder for silence keepalive: {e}");
+                return;
+            }
+        };
+
+        // 20 ms @ 48 kHz => 960 samples/channel, stereo => 1920 samples total.
+        const SILENCE_SAMPLES_TOTAL: usize = 960 * 2;
+        let pcm_silence: Vec<i16> = vec![0; SILENCE_SAMPLES_TOTAL];
+
+        // Opus packets are small; 4000 bytes is plenty for 20 ms.
+        let mut out = vec![0u8; 4000];
+
+        while !stopped.load(Ordering::SeqCst) && !audio_started.load(Ordering::SeqCst) {
+            let n = match enc.encode(&pcm_silence, &mut out) {
+                Ok(n) => n,
+                Err(e) => {
+                    tracing::warn!("webrtc: Opus silence encode failed: {e}");
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    continue;
+                }
+            };
+
+            let sample = webrtc::media::Sample {
+                data: Bytes::from(out[..n].to_vec()),
+                duration: Duration::from_millis(20),
+                ..Default::default()
+            };
+
+            // Ignore transient errors here; if the peer goes away, the state
+            // callbacks will flip `stopped` and all tasks will exit naturally.
+            let _ = track_for_silence.write_sample(&sample).await;
+
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    });
+}
+
     // Stop flag used by the audio pump task.
     let stopped = std::sync::Arc::new(AtomicBool::new(false));
     {
@@ -1002,6 +1076,9 @@ async fn api_webrtc_offer(
     let track_for_task = track.clone();
 
     tokio::spawn(async move {
+        let audio_started = audio_started.clone();
+        let mut wrote_first_packet = false;
+
         const SR: u32 = 48_000;
         const CHANNELS: usize = 2;
         const FRAME_SAMPLES_PER_CH: usize = 960; // 20 ms @ 48k
@@ -1066,6 +1143,11 @@ async fn api_webrtc_offer(
                     tracing::warn!("webrtc: write_sample failed (peer likely gone): {e}");
                     return;
                 }
+if !wrote_first_packet {
+    wrote_first_packet = true;
+    audio_started.store(true, Ordering::SeqCst);
+    tracing::info!("webrtc: first audio packet sent (silence keepalive will stop)");
+}
             }
         }
     });
