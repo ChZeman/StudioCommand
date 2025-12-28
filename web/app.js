@@ -1225,6 +1225,104 @@ function wireUI(){
   qs("#btnMonitors").onclick = () => openDrawer("monitors");
   qs("#closeMonitors").onclick = closeDrawers;
 
+
+  // --- Listen Live (WebRTC) ---------------------------------------------
+  //
+  // This is a low-latency monitor sourced from the engine's existing PCM
+  // pipeline (the same pipeline that feeds Icecast and meters).
+  //
+  // Signaling: POST /api/v1/webrtc/offer {sdp,type:"offer"} -> {sdp,type:"answer"}
+  //
+  // The browser receives Opus audio and plays it via an <audio> element.
+  //
+  // Important: WebRTC audio will only be present when the engine's output
+  // pipeline is running (because the PCM source lives there).
+  let listenPc = null;
+
+  const setListenStatus = (txt) => {
+    const el = qs("#mListenStatus");
+    if(el) el.textContent = txt;
+  };
+
+  const stopListenLive = async () => {
+    try{
+      if(listenPc){
+        try{ listenPc.getSenders().forEach(s => { try{ s.track && s.track.stop(); }catch(_){} }); }catch(_){}
+        listenPc.close();
+      }
+    }finally{
+      listenPc = null;
+      const a = qs("#listenAudio");
+      if(a){ a.srcObject = null; }
+      const startBtn = qs("#btnListenStart");
+      const stopBtn  = qs("#btnListenStop");
+      if(startBtn) startBtn.disabled = false;
+      if(stopBtn)  stopBtn.disabled = true;
+      setListenStatus("Stopped");
+    }
+  };
+
+  const startListenLive = async () => {
+    const startBtn = qs("#btnListenStart");
+    const stopBtn  = qs("#btnListenStop");
+    if(startBtn) startBtn.disabled = true;
+    if(stopBtn)  stopBtn.disabled  = false;
+
+    setListenStatus("Connecting…");
+
+    // Basic peer connection. We *only* receive audio.
+    const pc = new RTCPeerConnection({
+      iceServers: [{ urls: ["stun:stun.l.google.com:19302"] }]
+    });
+    listenPc = pc;
+
+    pc.addTransceiver("audio", { direction: "recvonly" });
+
+    pc.onconnectionstatechange = () => {
+      setListenStatus(pc.connectionState || "unknown");
+      if(["failed","closed","disconnected"].includes(pc.connectionState)){
+        // Clean up on failure.
+        stopListenLive();
+      }
+    };
+
+    pc.ontrack = (ev) => {
+      const a = qs("#listenAudio");
+      if(a){
+        a.srcObject = ev.streams[0];
+        a.play().catch(()=>{});
+      }
+    };
+
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+
+    // Send offer to the engine, receive answer.
+    const res = await fetch("/api/v1/webrtc/offer", {
+      method: "POST",
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({ sdp: offer.sdp, type: offer.type })
+    });
+    if(!res.ok){
+      throw new Error(`WebRTC offer failed: ${res.status}`);
+    }
+    const ans = await res.json();
+    await pc.setRemoteDescription({ type: "answer", sdp: ans.sdp });
+
+    setListenStatus("Connected");
+  };
+
+  const listenStartBtn = qs("#btnListenStart");
+  if(listenStartBtn) listenStartBtn.onclick = () => startListenLive().catch(err => {
+    console.error(err);
+    toast(`Listen Live failed: ${err.message || String(err)}`);
+    stopListenLive();
+  });
+
+  const listenStopBtn = qs("#btnListenStop");
+  if(listenStopBtn) listenStopBtn.onclick = () => stopListenLive();
+
+
   const undoBtn = qs("#btnUndoReorder");
   if(undoBtn) undoBtn.onclick = () => undoLastReorder();
 

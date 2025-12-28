@@ -168,7 +168,18 @@
       <div class="drawer-header">
         <div>
           <div class="drawer-title">Monitors</div>
-          <div class="drawer-sub">Engine • Audio • Streaming • Remote quality</div>
+          <div class="drawer-sub">Engine • Audio • Streaming • Remote quality
+          <div class="mon-card">
+            <div class="mon-title">Listen Live</div>
+            <div class="mon-row"><span>Status</span><span id="mListenStatus">Stopped</span></div>
+            <div class="mon-row"><span>Notes</span><span class="muted">WebRTC • Opus • low-latency</span></div>
+            <div class="mon-actions" style="display:flex; gap:8px; margin-top:10px;">
+              <button class="btn" id="btnListenStart">Start</button>
+              <button class="btn btn-ghost" id="btnListenStop" disabled>Stop</button>
+            </div>
+            <audio id="listenAudio" autoplay playsinline></audio>
+          </div>
+</div>
         </div>
         <button class="btn btn-ghost" id="closeMonitors" aria-label="Close monitors">✕</button>
       </div>

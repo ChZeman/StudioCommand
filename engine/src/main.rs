@@ -33,7 +33,19 @@ struct AppState {
     playout: Arc<tokio::sync::RwLock<PlayoutState>>,
     topup: Arc<tokio::sync::Mutex<TopUpConfig>>,
     output: Arc<tokio::sync::Mutex<OutputRuntime>>,
+
+    // Broadcast of real-time PCM chunks (s16le stereo @ 48 kHz).
+    //
+    // This is the *single source of truth* for:
+    //   - Icecast encoding (ffmpeg stdin)
+    //   - UI meters/progress (derived from PCM)
+    //   - WebRTC \"Listen Live\" monitor (Opus)
+    //
+    // We keep it as a broadcast channel so multiple WebRTC listeners can
+    // subscribe without changing the core audio pipeline.
+    pcm_tx: tokio::sync::broadcast::Sender<Vec<u8>>,
 }
+
 
 // --- Streaming output (Icecast) -----------------------------------------
 
@@ -587,12 +599,17 @@ let playout = PlayoutState {
     vu: VuLevels::default(),
 };
 
+    // WebRTC Listen Live needs access to the real PCM stream.
+    // We expose it internally as a broadcast channel so each peer can subscribe.
+    let (pcm_tx, _pcm_rx) = tokio::sync::broadcast::channel::<Vec<u8>>(64);
+
 let state = AppState {
     version: version.clone(),
     sys: Arc::new(tokio::sync::Mutex::new(sys)),
     playout: Arc::new(tokio::sync::RwLock::new(playout)),
     topup: Arc::new(tokio::sync::Mutex::new(topup_cfg)),
     output: Arc::new(tokio::sync::Mutex::new(OutputRuntime::new(output_cfg))),
+    pcm_tx,
 };
 
 // Optional: auto-start streaming output if config says enabled.
@@ -636,6 +653,7 @@ fn build_router(state: AppState) -> Router {
         .route("/api/v1/transport/dump", post(api_transport_dump))
         .route("/api/v1/transport/reload", post(api_transport_reload))
         .route("/api/v1/queue/remove", post(api_queue_remove))
+        .route("/api/v1/webrtc/offer", post(api_webrtc_offer))
         .route("/api/v1/queue/move", post(api_queue_move))
         .route("/api/v1/queue/reorder", post(api_queue_reorder))
         .route("/api/v1/queue/insert", post(api_queue_insert))
@@ -793,6 +811,266 @@ async fn meters(State(state): State<AppState>) -> Json<VuLevels> {
     let p = state.playout.read().await;
     Json(p.vu.clone())
 }
+
+
+// --- WebRTC "Listen Live" monitor ---------------------------------------
+//
+// This implements a simple single-endpoint signaling flow:
+//   Browser:  POST /api/v1/webrtc/offer  { sdp, type:"offer" }
+//   Engine :  200 OK                    { sdp, type:"answer" }
+//
+// The media source is the same PCM pipeline used for Icecast + meters.
+// We encode Opus frames in-process and publish them via a single WebRTC
+// peer connection per listener.
+//
+// Design notes:
+// - We *do not* create a new audio source per listener. Instead, we tap the
+//   existing PCM broadcast channel (`AppState.pcm_tx`) and encode Opus for
+//   each listener independently. (If CPU becomes a concern, we can evolve to a
+//   single shared Opus encoder + RTP fan-out later.)
+// - We standardize internal PCM to 48 kHz stereo so we can feed Opus/WebRTC
+//   without resampling.
+//
+// Browser support: all modern browsers support Opus in WebRTC.
+// Docs: https://docs.rs/webrtc (crate webrtc, WebRTC.rs stack).
+//
+// Security: this endpoint is intended for same-origin use behind your existing
+// TLS terminator (Caddy/Nginx). If you expose it publicly, treat it like any
+// other authenticated monitor endpoint.
+
+#[derive(Debug, Clone, Deserialize)]
+struct WebRtcOffer {
+    sdp: String,
+    #[serde(rename = "type")]
+    r#type: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct WebRtcAnswer {
+    sdp: String,
+    #[serde(rename = "type")]
+    r#type: String, // always "answer"
+}
+
+async fn api_webrtc_offer(
+    State(state): State<AppState>,
+    Json(offer): Json<WebRtcOffer>,
+) -> Result<Json<WebRtcAnswer>, StatusCode> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use bytes::Bytes;
+    use opus::{Application as OpusApplication, Channels as OpusChannels, Encoder as OpusEncoder};
+    use webrtc::api::APIBuilder;
+    use webrtc::api::media_engine::MediaEngine;
+    use webrtc::api::interceptor_registry::register_default_interceptors;
+    use webrtc::ice_transport::ice_server::RTCIceServer;
+    use webrtc::peer_connection::configuration::RTCConfiguration;
+    use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
+    use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
+    use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSample;
+    use webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecCapability;
+    use webrtc::media::Sample;
+
+    // Basic validation: browsers send {type:"offer"}.
+    if offer.r#type.to_lowercase() != "offer" {
+        tracing::warn!("webrtc offer rejected: type was {}", offer.r#type);
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    // --- Build WebRTC API stack (codecs + interceptors) -------------------
+    //
+    // MediaEngine: codec registry (Opus etc).
+    // Interceptors: RTCP, NACK, TWCC, etc. Default set is fine for audio-only.
+    let mut m = MediaEngine::default();
+    m.register_default_codecs()
+        .map_err(|e| {
+            tracing::warn!("webrtc: register_default_codecs failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    let mut registry = webrtc::interceptor::registry::Registry::new();
+    registry = register_default_interceptors(registry, &mut m)
+        .await
+        .map_err(|e| {
+            tracing::warn!("webrtc: register_default_interceptors failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    let api = APIBuilder::new()
+        .with_media_engine(m)
+        .with_interceptor_registry(registry)
+        .build();
+
+    // ICE servers: default to Google's public STUN unless overridden.
+    // This matters if you ever want to listen from outside the LAN.
+    let stun = std::env::var("STUDIOCOMMAND_WEBRTC_STUN")
+        .unwrap_or_else(|_| "stun:stun.l.google.com:19302".to_string());
+
+    let config = RTCConfiguration {
+        ice_servers: vec![RTCIceServer {
+            urls: vec![stun],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+
+    let pc = std::sync::Arc::new(api.new_peer_connection(config).await.map_err(|e| {
+        tracing::warn!("webrtc: new_peer_connection failed: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?);
+
+    // Track: Opus audio.
+    let track = std::sync::Arc::new(TrackLocalStaticSample::new(
+        RTCRtpCodecCapability {
+            mime_type: "audio/opus".to_string(),
+            clock_rate: 48_000,
+            channels: 2,
+            sdp_fmtp_line: "minptime=10;useinbandfec=1".to_string(),
+            rtcp_feedback: vec![],
+        },
+        "audio".to_string(),
+        "studiocommand".to_string(),
+    ));
+
+    pc.add_track(track.clone()).await.map_err(|e| {
+        tracing::warn!("webrtc: add_track failed: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    // Stop flag used by the audio pump task.
+    let stopped = std::sync::Arc::new(AtomicBool::new(false));
+    {
+        let stopped = stopped.clone();
+        pc.on_peer_connection_state_change(Box::new(move |s: RTCPeerConnectionState| {
+            if matches!(
+                s,
+                RTCPeerConnectionState::Failed
+                    | RTCPeerConnectionState::Closed
+                    | RTCPeerConnectionState::Disconnected
+            ) {
+                stopped.store(true, Ordering::Relaxed);
+            }
+            Box::pin(async {})
+        }))
+        .await;
+    }
+
+    // --- SDP handshake ----------------------------------------------------
+    pc.set_remote_description(
+        RTCSessionDescription::offer(offer.sdp)
+            .map_err(|e| {
+                tracing::warn!("webrtc: invalid offer SDP: {e}");
+                StatusCode::BAD_REQUEST
+            })?
+    )
+    .await
+    .map_err(|e| {
+        tracing::warn!("webrtc: set_remote_description failed: {e}");
+        StatusCode::BAD_REQUEST
+    })?;
+
+    let answer = pc.create_answer(None).await.map_err(|e| {
+        tracing::warn!("webrtc: create_answer failed: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    // Wait for ICE gathering to complete so the returned SDP includes candidates.
+    let gather_complete = pc.gathering_complete_promise().await;
+    pc.set_local_description(answer).await.map_err(|e| {
+        tracing::warn!("webrtc: set_local_description failed: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    let _ = gather_complete.recv().await;
+
+    let local = pc.local_description().await.ok_or_else(|| {
+        tracing::warn!("webrtc: local_description missing after set_local_description");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    // --- Audio pump -------------------------------------------------------
+    //
+    // Subscribe to the PCM broadcast channel and encode 20 ms Opus packets.
+    // PCM format: s16le stereo @ 48 kHz.
+    // A 20 ms Opus frame = 960 samples per channel.
+    let mut rx = state.pcm_tx.subscribe();
+    let stopped_for_task = stopped.clone();
+    let track_for_task = track.clone();
+
+    tokio::spawn(async move {
+        const SR: u32 = 48_000;
+        const CHANNELS: usize = 2;
+        const FRAME_SAMPLES_PER_CH: usize = 960; // 20 ms @ 48k
+        const FRAME_SAMPLES_TOTAL: usize = FRAME_SAMPLES_PER_CH * CHANNELS;
+        const FRAME_BYTES: usize = FRAME_SAMPLES_TOTAL * 2; // i16
+
+        // Opus encoder: stereo, 48 kHz, general audio.
+        let mut enc = match OpusEncoder::new(SR as u32, OpusChannels::Stereo, OpusApplication::Audio) {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!("webrtc: opus encoder init failed: {e}");
+                return;
+            }
+        };
+
+        // Buffer in case the PCM producer ever sends partial frames.
+        let mut buf: Vec<u8> = Vec::with_capacity(FRAME_BYTES * 4);
+
+        while !stopped_for_task.load(Ordering::Relaxed) {
+            let chunk = match rx.recv().await {
+                Ok(c) => c,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    // Listener fell behind; drop audio to catch up.
+                    tracing::warn!("webrtc: pcm receiver lagged by {n} messages (dropping)");
+                    continue;
+                }
+                Err(_) => break,
+            };
+
+            buf.extend_from_slice(&chunk);
+
+            while buf.len() >= FRAME_BYTES {
+                let frame = buf.drain(0..FRAME_BYTES).collect::<Vec<u8>>();
+
+                // Convert bytes -> i16 samples.
+                let mut samples: Vec<i16> = Vec::with_capacity(FRAME_SAMPLES_TOTAL);
+                let mut i = 0usize;
+                while i + 1 < frame.len() {
+                    samples.push(i16::from_le_bytes([frame[i], frame[i + 1]]));
+                    i += 2;
+                }
+
+                // Encode Opus.
+                let mut out = vec![0u8; 4000];
+                let n = match enc.encode(&samples, &mut out) {
+                    Ok(n) => n,
+                    Err(e) => {
+                        tracing::warn!("webrtc: opus encode failed: {e}");
+                        break;
+                    }
+                };
+                out.truncate(n);
+
+                // Ship as a media sample (WebRTC will packetize it as RTP).
+                let sample = Sample {
+                    data: Bytes::from(out),
+                    duration: std::time::Duration::from_millis(20),
+                    ..Default::default()
+                };
+
+                if let Err(e) = track_for_task.write_sample(&sample).await {
+                    tracing::warn!("webrtc: write_sample failed (peer likely gone): {e}");
+                    return;
+                }
+            }
+        }
+    });
+
+    Ok(Json(WebRtcAnswer {
+        sdp: local.sdp,
+        r#type: "answer".to_string(),
+    }))
+}
+
 #[derive(Serialize)]
 struct SystemInfo {
     name: String,
@@ -1001,7 +1279,7 @@ async fn api_output_set_config(
 }
 
 async fn api_output_start(State(state): State<AppState>) -> Result<Json<serde_json::Value>, StatusCode> {
-    output_start_internal(state.output.clone(), state.playout.clone(), state.topup.clone()).await?;
+    output_start_internal(state.output.clone(), state.playout.clone(), state.topup.clone(), state.pcm_tx.clone()).await?;
     Ok(Json(json!({"ok": true})))
 }
 
@@ -1010,7 +1288,12 @@ async fn api_output_stop(State(state): State<AppState>) -> Result<Json<serde_jso
     Ok(Json(json!({"ok": true})))
 }
 
-async fn output_start_internal(output: Arc<tokio::sync::Mutex<OutputRuntime>>, playout: Arc<tokio::sync::RwLock<PlayoutState>>, topup: Arc<tokio::sync::Mutex<TopUpConfig>>) -> Result<(), StatusCode> {
+async fn output_start_internal(
+    output: Arc<tokio::sync::Mutex<OutputRuntime>>,
+    playout: Arc<tokio::sync::RwLock<PlayoutState>>,
+    topup: Arc<tokio::sync::Mutex<TopUpConfig>>,
+    pcm_tx: tokio::sync::broadcast::Sender<Vec<u8>>,
+) -> Result<(), StatusCode> {
     let mut o = output.lock().await;
     if o.ffmpeg_child.is_some() {
         return Err(StatusCode::CONFLICT);
@@ -1038,7 +1321,7 @@ async fn output_start_internal(output: Arc<tokio::sync::Mutex<OutputRuntime>>, p
 
     let output_for_writer = output.clone();
     let writer_task = tokio::spawn(async move {
-        if let Err(e) = writer_playout(stdin, playout, topup).await {
+        if let Err(e) = writer_playout(stdin, playout, topup, pcm_tx).await {
             let mut o = output_for_writer.lock().await;
             o.status.state = "error".into();
             o.status.last_error = Some(format!("audio writer: {e}"));
@@ -1119,7 +1402,7 @@ async fn spawn_ffmpeg_icecast(cfg: &StreamOutputConfig) -> anyhow::Result<(tokio
     cmd.arg("-loglevel").arg("error");
     cmd.arg("-re");
     cmd.arg("-f").arg("s16le");
-    cmd.arg("-ar").arg("44100");
+    cmd.arg("-ar").arg("48000");
     cmd.arg("-ac").arg("2");
     cmd.arg("-i").arg("pipe:0");
 
@@ -1593,7 +1876,7 @@ async fn spawn_ffmpeg_decoder(input: &str) -> anyhow::Result<(tokio::process::Ch
         .arg("-loglevel").arg("error")
         .arg("-i").arg(input)
         .arg("-f").arg("s16le")
-        .arg("-ar").arg("44100")
+        .arg("-ar").arg("48000")
         .arg("-ac").arg("2")
         .arg("pipe:1")
         .stdout(std::process::Stdio::piped())
@@ -1837,9 +2120,12 @@ async fn writer_playout(
     mut stdin: tokio::process::ChildStdin,
     playout: Arc<tokio::sync::RwLock<PlayoutState>>,
     topup: Arc<tokio::sync::Mutex<TopUpConfig>>,
+    pcm_tx: tokio::sync::broadcast::Sender<Vec<u8>>,
 ) -> anyhow::Result<()> {
-    const SR: u32 = 44100;
-    const FRAMES: usize = 1024;
+    const SR: u32 = 48_000;
+    // 20 ms @ 48 kHz = 960 frames. Keeping the chunk size aligned to 20 ms makes
+    // WebRTC/Opus framing straightforward and keeps pacing accurate.
+    const FRAMES: usize = 960;
     const BYTES_PER_FRAME: usize = 2 * 2; // s16le * stereo
     const CHUNK_BYTES: usize = FRAMES * BYTES_PER_FRAME;
 
@@ -1952,6 +2238,11 @@ loop {
 
     // Analyze *before* writing so we can update meters even if the encoder blocks briefly.
     let inst = analyze_pcm_s16le_stereo(&buf[..n]);
+
+    // Fan out the raw PCM to any WebRTC listeners.
+    // If there are no receivers, broadcast::Sender::send returns an error; that's fine.
+    let _ = pcm_tx.send(buf[..n].to_vec());
+
 
     // Pace writes to match real-time.
     interval.tick().await;

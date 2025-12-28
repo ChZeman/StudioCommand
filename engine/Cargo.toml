@@ -1,6 +1,6 @@
 [package]
 name = "studiocommand-engine"
-version = "0.1.53"
+version = "0.1.54"
 edition = "2021"
 
 [dependencies]
@@ -16,3 +16,14 @@ anyhow = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 fastrand = "2"
+
+# --- WebRTC Listen Live (v0.1.54) ---
+# webrtc provides a pure-Rust WebRTC stack.
+# We use it to create a low-latency "Listen Live" monitor in the browser.
+webrtc = "0.14.0"
+
+# Opus encoder (libopus bindings). Most Linux distros (and GitHub Actions runners)
+# provide libopus; if your build environment does not, install libopus-dev.
+opus = "0.3.0"
+bytes = "1"
+base64 = "0.22"
