@@ -80,7 +80,12 @@ struct AppState {
 // Future: multi-listener can be implemented by storing sessions in a HashMap
 // keyed by a UUID returned from `/offer`.
 struct WebRtcRuntime {
-    pc: std::sync::Arc<webrtc::peer_connection::peer_connection::RTCPeerConnection>,
+    /// The active WebRTC PeerConnection for the operator "Listen Live" monitor.
+    ///
+    /// The `webrtc` crate exposes this type at `webrtc::peer_connection::RTCPeerConnection`.
+    /// (Earlier iterations accidentally referenced a non-existent nested module
+    /// path: `peer_connection::peer_connection::RTCPeerConnection`.)
+    pc: std::sync::Arc<webrtc::peer_connection::RTCPeerConnection>,
     stopped: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
