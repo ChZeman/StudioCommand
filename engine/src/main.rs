@@ -44,8 +44,52 @@ struct AppState {
     // We keep it as a broadcast channel so multiple WebRTC listeners can
     // subscribe without changing the core audio pipeline.
     pcm_tx: tokio::sync::broadcast::Sender<Vec<u8>>,
+
+    // Active WebRTC "Listen Live" session (if any).
+    //
+    // We intentionally keep *at most one* active session for now because this
+    // feature is primarily a low-latency *operator monitor* rather than a
+    // public listener endpoint. This also keeps the signaling simple: the UI
+    // can POST ICE candidates to `/api/v1/webrtc/candidate` without needing a
+    // session id.
+    //
+    // If/when you want multiple concurrent listeners, we can evolve this into
+    // a map keyed by a session UUID returned from the `/offer` response.
+    webrtc: Arc<tokio::sync::Mutex<Option<WebRtcRuntime>>>,
 }
 
+
+
+// --- WebRTC "Listen Live" ---------------------------------------------------
+//
+// The UI uses a minimal HTTP signaling flow:
+//   1) POST /api/v1/webrtc/offer      (send SDP offer, receive SDP answer)
+//   2) POST /api/v1/webrtc/candidate  (send browser ICE candidates)
+//
+// Why we need the /candidate endpoint:
+//   WebRTC ICE negotiation is bi-directional. Even if the server includes its
+//   own host/srflx candidates in the SDP answer, the server still needs the
+//   browser's candidates (from `RTCPeerConnection.onicecandidate`) to
+//   establish a working ICE pair. Without those, ICE tends to get stuck at
+//   `checking` and the browser eventually tears the connection down.
+//
+// For now, StudioCommand supports a single active listen-live session at a
+// time (operator monitor). This keeps signaling dead-simple and avoids
+// accumulating idle peer connections on a small box.
+//
+// Future: multi-listener can be implemented by storing sessions in a HashMap
+// keyed by a UUID returned from `/offer`.
+struct WebRtcRuntime {
+    pc: std::sync::Arc<webrtc::peer_connection::peer_connection::RTCPeerConnection>,
+    stopped: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[derive(Clone, Deserialize)]
+struct WebRtcCandidate {
+    // The browser sends an `RTCIceCandidate` which is compatible with
+    // `RTCIceCandidateInit` (candidate string + mid/mline_index).
+    candidate: webrtc::ice_transport::ice_candidate::RTCIceCandidateInit,
+}
 
 // --- Streaming output (Icecast) -----------------------------------------
 
@@ -610,6 +654,7 @@ let state = AppState {
     topup: Arc::new(tokio::sync::Mutex::new(topup_cfg)),
     output: Arc::new(tokio::sync::Mutex::new(OutputRuntime::new(output_cfg))),
     pcm_tx,
+    webrtc: Arc::new(tokio::sync::Mutex::new(None)),
 };
 
 // Optional: auto-start streaming output if config says enabled.
@@ -655,6 +700,7 @@ fn build_router(state: AppState) -> Router {
         .route("/api/v1/transport/reload", post(api_transport_reload))
         .route("/api/v1/queue/remove", post(api_queue_remove))
         .route("/api/v1/webrtc/offer", post(api_webrtc_offer))
+        .route("/api/v1/webrtc/candidate", post(api_webrtc_candidate))
         .route("/api/v1/queue/move", post(api_queue_move))
         .route("/api/v1/queue/reorder", post(api_queue_reorder))
         .route("/api/v1/queue/insert", post(api_queue_insert))
@@ -926,6 +972,30 @@ async fn api_webrtc_offer(
         tracing::warn!("webrtc: new_peer_connection failed: {e}");
         StatusCode::INTERNAL_SERVER_ERROR
     })?);
+    // A shared stop flag used by background tasks (silence keepalive, PCM pump).
+    let stopped = std::sync::Arc::new(AtomicBool::new(false));
+
+    // Replace any existing session (if the operator clicks Start repeatedly).
+    //
+    // We proactively stop the previous PeerConnection to avoid leaving idle
+    // DTLS/SRTP tasks running on small machines.
+    {
+        let mut guard = state.webrtc.lock().await;
+        if let Some(prev) = guard.take() {
+            prev.stopped.store(true, Ordering::SeqCst);
+            // Close is best-effort; we don't fail the new session if it errors.
+            if let Err(e) = prev.pc.close().await {
+                tracing::warn!("webrtc: closing previous PeerConnection failed: {e}");
+            }
+        }
+
+        *guard = Some(WebRtcRuntime {
+            pc: pc.clone(),
+            stopped: stopped.clone(),
+        });
+    }
+
+
 
     // Track: Opus audio.
     let track = std::sync::Arc::new(TrackLocalStaticSample::new(
@@ -968,7 +1038,6 @@ async fn api_webrtc_offer(
 //   - CPU cost is negligible.
 //   - It dramatically improves connection reliability and debuggability.
 // ---------------------------------------------------------------------
-let stopped = std::sync::Arc::new(AtomicBool::new(false));
 let audio_started = std::sync::Arc::new(AtomicBool::new(false));
 {
     let track_for_silence = track.clone();
@@ -1186,6 +1255,45 @@ struct SystemInfo {
 }
 
 
+
+
+/// Receive browser ICE candidates for the current WebRTC session.
+///
+/// WebRTC ICE negotiation is *bi-directional*: the server needs the browser's
+/// candidates in order to find a valid candidate pair. Without this endpoint,
+/// ICE commonly gets stuck at `checking` and the browser eventually closes the
+/// connection (the UI reverts to "Stopped").
+///
+/// The UI calls this from `pc.onicecandidate` while a session is active.
+///
+/// For now there is only one active session at a time (operator monitor).
+async fn api_webrtc_candidate(
+    State(state): State<AppState>,
+    Json(body): Json<WebRtcCandidate>,
+) -> Result<StatusCode, StatusCode> {
+    // Grab a snapshot of the current PeerConnection (if any) without holding
+    // the mutex across an await on `add_ice_candidate`.
+    let pc_opt = {
+        let guard = state.webrtc.lock().await;
+        guard.as_ref().map(|rt| rt.pc.clone())
+    };
+
+    let pc = match pc_opt {
+        Some(pc) => pc,
+        None => {
+            // No active session. This can happen if the user hit Stop while
+            // candidates were still trickling from the browser.
+            return Err(StatusCode::CONFLICT);
+        }
+    };
+
+    pc.add_ice_candidate(body.candidate).await.map_err(|e| {
+        tracing::warn!("webrtc: add_ice_candidate failed: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
 
 async fn ping(State(state): State<AppState>) -> Json<serde_json::Value> {
     Json(json!({

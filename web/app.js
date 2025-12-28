@@ -10,7 +10,7 @@ const TARGET_LOG_LEN = 12;
 
 // NOTE: UI_VERSION is purely informational (tooltip on the header).
 // The authoritative running version is exposed by the backend at /api/v1/status.
-const UI_VERSION = "0.1.61";
+const UI_VERSION = "0.1.62";
 
 const state = {
   role: "operator",
@@ -1305,6 +1305,27 @@ function wireUI(){
     pc.onicegatheringstatechange  = refreshStates;
 
     listenPc = pc;
+
+    // IMPORTANT: ICE candidates must be sent from the browser to the engine.
+    //
+    // Without this, ICE often gets stuck at `checking` and the browser will
+    // eventually tear the connection down (the UI reverts to "Stopped").
+    //
+    // We keep signaling simple: a single active monitor session at a time, so
+    // the engine applies candidates to the current PeerConnection.
+    pc.onicecandidate = async (ev) => {
+      if(!ev.candidate) return; // end-of-candidates
+      try{
+        const c = (typeof ev.candidate.toJSON === "function") ? ev.candidate.toJSON() : ev.candidate;
+        await fetch("/api/v1/webrtc/candidate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ candidate: c })
+        });
+      }catch(err){
+        console.warn("webrtc: failed to POST ICE candidate", err);
+      }
+    };
 
     pc.addTransceiver("audio", { direction: "recvonly" });
 
