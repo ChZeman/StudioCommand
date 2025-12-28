@@ -10,7 +10,7 @@ const TARGET_LOG_LEN = 12;
 
 // NOTE: UI_VERSION is purely informational (tooltip on the header).
 // The authoritative running version is exposed by the backend at /api/v1/status.
-const UI_VERSION = "0.1.65";
+const UI_VERSION = "0.1.66";
 
 const state = {
   role: "operator",
@@ -584,6 +584,12 @@ function renderLog(){
     row.className = "log-item";
     row.tabIndex = 0;
 
+    // The playing row (idx==0) should be visually distinct so an operator can
+    // locate "what is live" at a glance, even in a long queue.
+    if(idx === 0 || (it.state && String(it.state).toLowerCase() === "playing")){
+      row.classList.add("playing");
+    }
+
     // Stable identifiers used by delegated handlers.
     row.dataset.idx = String(idx);
     row.dataset.id = it.id || "";
@@ -960,7 +966,9 @@ function renderCarts(){
   const items = state.carts[state.cartTab] || [];
   items.forEach(it => {
     const c = document.createElement("div");
-    c.className = "cart";
+    // Add a small category class so we can color-code cart banks.
+    // This keeps the UI expressive without relying on hard-coded button colors.
+    c.className = `cart cart-${state.cartTab}`;
     c.innerHTML = `
       <div class="c-title">${it.title}</div>
       <div class="c-sub">${it.sub}</div>
@@ -1487,6 +1495,19 @@ function wireUI(){
 
   const listenStopBtn = qs("#btnListenStop");
   if(listenStopBtn) listenStopBtn.onclick = () => stopListenLive();
+
+  // One-click "Listen Live" from the right-rail Control Panel (v0.1.66).
+  // This is intentionally opinionated:
+  // - Opens the Monitors drawer so the operator can see ICE/state
+  // - Starts Listen Live if it's not already running
+  const liveBtn = qs("#btnLiveAudio");
+  if(liveBtn) liveBtn.onclick = () => {
+    openDrawer("monitors");
+    startListenLive().catch(err => {
+      toast(`Listen Live failed: ${err.message || String(err)}`);
+      stopListenLive();
+    });
+  };
 
 
   const undoBtn = qs("#btnUndoReorder");

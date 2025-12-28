@@ -119,6 +119,16 @@ body{
   position: relative;
 }
 
+/* Now-playing row emphasis (v0.1.66)
+   Rationale: operators asked for a clearer "what is live right now" cue.
+   We use a subtle green tint that reads well on dark backgrounds without
+   overpowering the rest of the log. */
+.log-item.playing{
+  border-color: rgba(124,255,178,.28);
+  background: rgba(16,28,22,.72);
+  box-shadow: 0 0 0 1px rgba(124,255,178,.12) inset;
+}
+
 .log-item.selected{ outline:2px solid rgba(79,156,255,.55); }
 
 /* Flash highlight (v0.1.27)
@@ -274,12 +284,30 @@ body{
   min-height:76px;
 }
 .cart:hover{background: rgba(14,18,22,.75)}
+
+/* Cart bank color accents (v0.1.66)
+   Rationale: operators wanted the carts to "pop" and to be visually grouped.
+   We keep accents subtle: a thin inset stripe + slightly tinted border.
+   (No hard bright fills that would fight the program meter colors.) */
+.cart-jingles{ box-shadow: inset 0 3px 0 rgba(152,120,255,.55); border-color: rgba(152,120,255,.22); }
+.cart-beds{    box-shadow: inset 0 3px 0 rgba(120,240,255,.55); border-color: rgba(120,240,255,.22); }
+.cart-sfx{     box-shadow: inset 0 3px 0 rgba(255,209,102,.55); border-color: rgba(255,209,102,.22); }
+.cart-ads{     box-shadow: inset 0 3px 0 rgba(255,92,92,.50);  border-color: rgba(255,92,92,.22); }
 .cart .c-title{font-weight:900; line-height:1.15}
 .cart .c-sub{font-size:12px; color:var(--muted2)}
 .cart .c-meta{margin-top:auto; display:flex; justify-content:space-between; font-family:var(--mono); color:var(--muted2); font-size:11px}
 
 .right-actions{padding:12px; display:flex; flex-direction:column; gap:10px; margin-top:auto}
 .w100{width:100%}
+
+/* Right rail sections (v0.1.66)
+   The right rail is now a container with stacked nested panels.
+   We remove excess padding to preserve vertical space. */
+.side-sub{margin:12px;}
+.panel-title-compact{padding:10px 10px 8px;}
+.producers-compact{max-height: 210px; overflow:auto;}
+.side-controls{padding:12px; display:flex; flex-direction:column; gap:8px;}
+.muted-note{font-size:12px; color:var(--muted2);}
 
 .btn{
   border-radius:12px;

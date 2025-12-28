@@ -122,14 +122,43 @@
 
       <aside class="panel right">
         <div class="panel-title">
-          <div>Remote Producers</div>
+          <div>Remote</div>
           <div class="panel-meta">Always visible</div>
         </div>
-        <div class="producers" id="producerTiles"></div>
-        <div class="right-actions">
-          <button class="btn btn-secondary w100" id="btnTalkbackAll">Talkback All</button>
-          <button class="btn btn-secondary w100" id="btnInvite">Invite</button>
-        </div>
+
+        <!--
+          Right rail redesign (v0.1.66)
+
+          The previous layout used the entire panel for "Remote Producers".
+          Operators asked for more vertical real-estate, so we split the right rail
+          into compact, clearly-scoped sections.
+
+          1) Remote Producers: contribution status + quick actions
+          2) Control Panel: operator utilities (first: one-click Listen Live)
+        -->
+
+        <section class="panel nested side-sub">
+          <div class="panel-title panel-title-compact">
+            <div>Remote Producers</div>
+            <div class="panel-meta">Compact</div>
+          </div>
+          <div class="producers producers-compact" id="producerTiles"></div>
+          <div class="right-actions">
+            <button class="btn btn-secondary w100" id="btnTalkbackAll">Talkback All</button>
+            <button class="btn btn-secondary w100" id="btnInvite">Invite</button>
+          </div>
+        </section>
+
+        <section class="panel nested side-sub">
+          <div class="panel-title panel-title-compact">
+            <div>Control Panel</div>
+            <div class="panel-meta">Operator</div>
+          </div>
+          <div class="side-controls">
+            <button class="btn btn-primary w100" id="btnLiveAudio">Listen Live</button>
+            <div class="muted-note">Opens Monitors and starts WebRTC audio.</div>
+          </div>
+        </section>
       </aside>
     </main>
 
@@ -310,9 +339,6 @@
             <div class="help-row"><kbd>R</kbd><span>Reload status</span></div>
             <div class="help-row"><kbd>Ctrl</kbd> + <kbd>F</kbd><span>Focus Library search</span></div>
             <div class="help-row"><kbd>Ctrl</kbd> + <kbd>Z</kbd><span>Undo last reorder</span></div>
-          </div>
-          <div class="muted" style="margin-top:12px;">
-            Tip: while dragging to reorder, live refresh is deferred to keep the drag stable.
           </div>
         </div>
       </div>

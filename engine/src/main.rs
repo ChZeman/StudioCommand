@@ -2514,7 +2514,9 @@ p.vu = VuLevels::default();
         tracing::info!("playout start: {} - {} ({})", artist, title, path);
 
         // Start decoder and stream PCM to encoder stdin.
-        let (_child, mut dec_stdout) = match spawn_ffmpeg_decoder(&path).await {
+        // IMPORTANT: we keep the Child handle so we can kill the decoder early
+        // on operator actions like "skip" or "dump".
+        let (mut child, mut dec_stdout) = match spawn_ffmpeg_decoder(&path).await {
             Ok(v) => v,
             Err(e) => {
                 tracing::warn!("decoder spawn failed for {path}: {e}");
@@ -2533,7 +2535,25 @@ let mut frames_written: u64 = 0;
 // Meter + position updates (keep lock cadence modest).
 let mut last_update = std::time::Instant::now() - std::time::Duration::from_secs(1);
 
+// If an operator advances the queue while we're mid-track (Skip/Dump), we must
+// stop emitting this track immediately. Otherwise the UI will jump to the next
+// item while the previous track continues to play until EOF.
+let mut interrupted = false;
+
 loop {
+    // Check for operator-driven queue advance.
+    // We do this on every chunk (20ms) which is cheap and keeps stop latency low.
+    {
+        let p = playout.read().await;
+        if p.log.is_empty() || p.log[0].id != id {
+            interrupted = true;
+        }
+    }
+    if interrupted {
+        tracing::info!("playout interrupted (skip/dump): {} - {}", artist, title);
+        break;
+    }
+
     let n = dec_stdout.read(&mut buf).await?;
     if n == 0 {
         break;
@@ -2578,7 +2598,16 @@ loop {
     }
 }
 
-        tracing::info!("playout end: {} - {}", artist, title);
+        // If we broke out because the operator advanced the queue, kill ffmpeg
+        // so the audio actually stops. Otherwise the child would keep decoding
+        // in the background until it reaches EOF.
+        if interrupted {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            tracing::info!("playout stop: {} - {}", artist, title);
+        } else {
+            tracing::info!("playout end: {} - {}", artist, title);
+        }
 
         // Advance the queue if the currently playing id still matches log[0].
         let mut snapshot_to_persist: Option<Vec<LogItem>> = None;
