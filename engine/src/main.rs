@@ -982,7 +982,7 @@ async fn api_webrtc_offer(
     })?;
 
     // Wait for ICE gathering to complete so the returned SDP includes candidates.
-    let gather_complete = pc.gathering_complete_promise().await;
+    let mut gather_complete = pc.gathering_complete_promise().await;
     pc.set_local_description(answer).await.map_err(|e| {
         tracing::warn!("webrtc: set_local_description failed: {e}");
         StatusCode::INTERNAL_SERVER_ERROR
@@ -1314,7 +1314,7 @@ async fn output_start_internal(
     }
 
     // Spawn ffmpeg and a simple audio generator to prove end-to-end streaming.
-    let (mut child, stdin, stderr) = spawn_ffmpeg_icecast(&o.config).await.map_err(|e| {
+    let (child, stdin, stderr) = spawn_ffmpeg_icecast(&o.config).await.map_err(|e| {
         o.status.state = "error".into();
         o.status.last_error = Some(e.to_string());
         StatusCode::INTERNAL_SERVER_ERROR
@@ -2162,7 +2162,7 @@ async fn writer_playout(
         }
 
         // Determine current track (log[0]) and resolve its path.
-        let (id, title, artist, dur_s, path_opt) = {
+        let (id, title, artist, _dur_s, path_opt) = {
             let mut p = playout.write().await;
 
             if p.log.is_empty() {
