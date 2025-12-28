@@ -502,8 +502,17 @@ struct LogItem {
 struct NowPlaying {
     title: String,
     artist: String,
-    dur: u32, // seconds
-    pos: u32, // seconds
+    dur: u32,   // seconds
+    pos: u32,   // whole seconds (legacy/compat)
+    pos_f: f64, // seconds with fractions (for smooth UI)
+}
+
+#[derive(Clone, Serialize, Default)]
+struct VuLevels {
+    rms_l: f32,
+    rms_r: f32,
+    peak_l: f32,
+    peak_r: f32,
 }
 
 #[derive(Clone, Serialize)]
@@ -523,12 +532,17 @@ struct PlayoutState {
     now: NowPlaying,
     log: Vec<LogItem>,
     producers: Vec<ProducerStatus>,
+
+    // Internal timing/meters derived from the real PCM stream.
+    track_started_at: Option<std::time::Instant>,
+    vu: VuLevels,
 }
 
 #[derive(Serialize)]
 struct StatusResponse {
     version: String,
     now: NowPlaying,
+    vu: VuLevels,
     log: Vec<LogItem>,
     producers: Vec<ProducerStatus>,
     system: SystemInfo,
@@ -565,10 +579,12 @@ let topup_cfg = load_topup_config_from_db_or_default().await;
 persist_queue(log.clone()).await;
 
 let playout = PlayoutState {
-    now: NowPlaying { title: "Neutron Dance".into(), artist: "Pointer Sisters".into(), dur: 242, pos: 0 },
+    now: NowPlaying { title: "Neutron Dance".into(), artist: "Pointer Sisters".into(), dur: 242, pos: 0, pos_f: 0.0 },
     // Load the queue from SQLite if present; otherwise fall back to a demo queue.
     log: log.clone(),
     producers: demo_producers(),
+    track_started_at: None,
+    vu: VuLevels::default(),
 };
 
 let state = AppState {
@@ -665,6 +681,7 @@ async fn playout_tick(playout: Arc<tokio::sync::RwLock<PlayoutState>>) {
 
         let mut p = playout.write().await;
         p.now.pos = p.now.pos.saturating_add(1);
+        p.now.pos_f = p.now.pos as f64;
 
         // When the current item finishes, drop it from the log and promote the next item.
         //
@@ -674,6 +691,9 @@ async fn playout_tick(playout: Arc<tokio::sync::RwLock<PlayoutState>>) {
         // "track ends" event occurs.
         if p.now.pos >= p.now.dur {
             p.now.pos = 0;
+    p.now.pos_f = 0.0;
+    p.track_started_at = Some(std::time::Instant::now());
+    p.vu = VuLevels::default();
 
             if !p.log.is_empty() {
                 // Remove the playing item (top of log).
@@ -738,9 +758,25 @@ async fn status(State(state): State<AppState>) -> Json<StatusResponse> {
     let system = (system_info(State(state.clone())).await).0;
 
     let p = state.playout.read().await;
+
+    // Derive position from a monotonic clock instead of tick updates.
+    let mut now = p.now.clone();
+    if let Some(started) = p.track_started_at {
+        let mut pos_f = started.elapsed().as_secs_f64();
+        if now.dur > 0 {
+            pos_f = pos_f.min(now.dur as f64);
+        }
+        now.pos_f = pos_f;
+        now.pos = pos_f.floor() as u32;
+    } else {
+        now.pos_f = 0.0;
+        now.pos = 0;
+    }
+
     Json(StatusResponse {
         version: state.version.clone(),
-        now: p.now.clone(),
+        now,
+        vu: p.vu.clone(),
         log: p.log.clone(),
         producers: p.producers.clone(),
         system,
@@ -1381,7 +1417,7 @@ fn normalize_log_state(p: &mut PlayoutState){
         p.now.artist = first.artist.clone();
         p.now.dur = parse_dur_to_sec(&first.dur);
         // keep current position, but clamp to duration
-        if p.now.pos > p.now.dur { p.now.pos = 0; }
+        if p.now.pos > p.now.dur { p.now.pos = 0; p.now.pos_f = 0.0; }
     }
 }
 
@@ -1391,6 +1427,9 @@ fn reset_demo_playout(p: &mut PlayoutState) {
     p.now.artist = "Club Nouveau".into();
     p.now.dur = 3*60 + 48;
     p.now.pos = 0;
+    p.now.pos_f = 0.0;
+    p.track_started_at = Some(std::time::Instant::now());
+    p.vu = VuLevels::default();
 
     p.log = vec![
         LogItem{ id: Uuid::new_v4(), tag:"MUS".into(), time:"15:33".into(), title:"Lean On Me".into(), artist:"Club Nouveau".into(), state:"playing".into(), dur:"3:48".into(), cart:"080-0599".into() },
@@ -1434,12 +1473,18 @@ fn advance_to_next(p: &mut PlayoutState, reason: Option<&str>) {
         p.now.artist = first.artist.clone();
         p.now.dur = parse_dur_to_sec(&first.dur);
         p.now.pos = 0;
+    p.now.pos_f = 0.0;
+    p.track_started_at = Some(std::time::Instant::now());
+    p.vu = VuLevels::default();
     } else {
         // Empty log: clear now
         p.now.title = "".into();
         p.now.artist = "".into();
         p.now.dur = 0;
         p.now.pos = 0;
+    p.now.pos_f = 0.0;
+    p.track_started_at = Some(std::time::Instant::now());
+    p.vu = VuLevels::default();
     }
 
     // Maintain "next" marker
@@ -1546,6 +1591,60 @@ async fn spawn_ffmpeg_decoder(input: &str) -> anyhow::Result<(tokio::process::Ch
 fn make_silence_chunk(frames: usize) -> Vec<u8> {
     // s16le stereo = 2 bytes * 2 channels
     vec![0u8; frames * 2 * 2]
+}
+
+fn clamp01_f32(x: f32) -> f32 { x.max(0.0).min(1.0) }
+
+fn analyze_pcm_s16le_stereo(buf: &[u8]) -> VuLevels {
+    // Interleaved stereo, little-endian i16.
+    // Returns per-channel RMS and peak, normalized to [0,1].
+    let mut sumsq_l: f64 = 0.0;
+    let mut sumsq_r: f64 = 0.0;
+    let mut peak_l: i32 = 0;
+    let mut peak_r: i32 = 0;
+    let mut nframes: u64 = 0;
+
+    let mut i = 0usize;
+    while i + 3 < buf.len() {
+        let l = i16::from_le_bytes([buf[i], buf[i + 1]]) as i32;
+        let r = i16::from_le_bytes([buf[i + 2], buf[i + 3]]) as i32;
+        let al = l.abs();
+        let ar = r.abs();
+        if al > peak_l { peak_l = al; }
+        if ar > peak_r { peak_r = ar; }
+        sumsq_l += (l as f64) * (l as f64);
+        sumsq_r += (r as f64) * (r as f64);
+        nframes += 1;
+        i += 4;
+    }
+
+    if nframes == 0 {
+        return VuLevels::default();
+    }
+
+    let mean_l = sumsq_l / (nframes as f64);
+    let mean_r = sumsq_r / (nframes as f64);
+
+    let rms_l = (mean_l.sqrt() / 32768.0) as f32;
+    let rms_r = (mean_r.sqrt() / 32768.0) as f32;
+    let pk_l = (peak_l as f32) / 32768.0;
+    let pk_r = (peak_r as f32) / 32768.0;
+
+    VuLevels {
+        rms_l: clamp01_f32(rms_l),
+        rms_r: clamp01_f32(rms_r),
+        peak_l: clamp01_f32(pk_l),
+        peak_r: clamp01_f32(pk_r),
+    }
+}
+
+fn smooth_level(current: f32, target: f32, attack: f32, release: f32) -> f32 {
+    // attack/release are smoothing factors in (0,1]; higher = faster.
+    if target >= current {
+        current + (target - current) * attack
+    } else {
+        current + (target - current) * release
+    }
 }
 
 fn parse_dur_seconds(dur: &str) -> Option<u32> {
@@ -1759,6 +1858,16 @@ async fn writer_playout(
 
             if p.log.is_empty() {
                 // Nothing to play.
+                p.now.title.clear();
+                p.now.artist.clear();
+                p.now.dur = 0;
+                p.now.pos = 0;
+    p.now.pos_f = 0.0;
+    p.track_started_at = Some(std::time::Instant::now());
+    p.vu = VuLevels::default();
+                p.track_started_at = None;
+                p.vu = VuLevels::default();
+
                 (Uuid::nil(), "".into(), "".into(), 0u32, None)
             } else {
                 normalize_queue_states(&mut p.log);
@@ -1777,11 +1886,16 @@ async fn writer_playout(
                 let path_opt = resolve_cart_to_path(&cart)
                     .or_else(|| if cart.starts_with('/') { Some(cart.clone()) } else { None });
 
-                // Update now-playing.
+                // Update now-playing (monotonic clock anchor + reset meters).
                 p.now.title = title.clone();
                 p.now.artist = artist.clone();
                 p.now.dur = dur_s;
                 p.now.pos = 0;
+    p.now.pos_f = 0.0;
+    p.track_started_at = Some(std::time::Instant::now());
+    p.vu = VuLevels::default();
+                p.track_started_at = Some(std::time::Instant::now());
+                p.vu = VuLevels::default();
 
                 (first_id, title, artist, dur_s, path_opt)
             }
@@ -1807,27 +1921,37 @@ async fn writer_playout(
             }
         };
 
-        let mut buf = vec![0u8; CHUNK_BYTES];
-        let mut frames_played: u64 = 0;
+let mut buf = vec![0u8; CHUNK_BYTES];
 
-        loop {
-            let n = dec_stdout.read(&mut buf).await?;
-            if n == 0 {
-                break;
-            }
+// Meter smoothing is handled here so the UI stays stable.
+let mut last_meter_update = std::time::Instant::now() - std::time::Duration::from_secs(1);
 
-            interval.tick().await;
-            stdin.write_all(&buf[..n]).await?;
+loop {
+    let n = dec_stdout.read(&mut buf).await?;
+    if n == 0 {
+        break;
+    }
 
-            frames_played += (n as u64) / (BYTES_PER_FRAME as u64);
-            let pos_s = (frames_played / (SR as u64)) as u32;
+    // Analyze *before* writing so we can update meters even if the encoder blocks briefly.
+    let inst = analyze_pcm_s16le_stereo(&buf[..n]);
 
-            // Update pos occasionally (cheap).
-            if frames_played % (SR as u64) < (FRAMES as u64) {
-                let mut p = playout.write().await;
-                p.now.pos = pos_s;
-            }
-        }
+    // Pace writes to match real-time.
+    interval.tick().await;
+    stdin.write_all(&buf[..n]).await?;
+
+    // Update meters at ~30 Hz (cheap).
+    if last_meter_update.elapsed() >= std::time::Duration::from_millis(33) {
+        last_meter_update = std::time::Instant::now();
+
+        let mut p = playout.write().await;
+        // RMS smoothing (slower).
+        p.vu.rms_l = smooth_level(p.vu.rms_l, inst.rms_l, 0.20, 0.06);
+        p.vu.rms_r = smooth_level(p.vu.rms_r, inst.rms_r, 0.20, 0.06);
+        // Peak smoothing (faster attack, slower decay).
+        p.vu.peak_l = smooth_level(p.vu.peak_l, inst.peak_l, 0.45, 0.10);
+        p.vu.peak_r = smooth_level(p.vu.peak_r, inst.peak_r, 0.45, 0.10);
+    }
+}
 
         tracing::info!("playout end: {} - {}", artist, title);
 
@@ -1849,11 +1973,17 @@ async fn writer_playout(
                     p.now.artist = a;
                     p.now.dur = d;
                     p.now.pos = 0;
+                    p.now.pos_f = 0.0;
+                    p.track_started_at = Some(std::time::Instant::now());
+                    p.vu = VuLevels::default();
                 } else {
                     p.now.title.clear();
                     p.now.artist.clear();
                     p.now.dur = 0;
                     p.now.pos = 0;
+                    p.now.pos_f = 0.0;
+                    p.track_started_at = None;
+                    p.vu = VuLevels::default();
                 }
 
                 // Top-up if configured and queue is getting low.

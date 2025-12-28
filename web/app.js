@@ -269,15 +269,31 @@ if(state.flashArmed && Array.isArray(state.flashPrevOrder) && state.flashPrevOrd
   state.flashPrevOrder = [];
 }
 
-    // Now-playing (pos/dur are seconds in the API)
+    // Now-playing (the API provides pos seconds plus pos_f for smooth UI)
     if(data.now && typeof data.now === "object"){
+      const dur = Number(data.now.dur || 0) || 0;
+      const posLegacy = Number(data.now.pos || 0) || 0;
+      const posF = (data.now.pos_f !== undefined) ? (Number(data.now.pos_f) || 0) : posLegacy;
+
       state.now = {
         title: data.now.title || "",
         artist: data.now.artist || "",
-        dur: Number(data.now.dur || 0) || 0,
-        pos: Number(data.now.pos || 0) || 0,
+        dur,
+        pos: posLegacy,
+        posF,
+        _anchorClientMs: performance.now(),
+        _anchorPosF: posF,
         ends: "",
       };
+    }
+
+    // Live VU meters (derived from PCM in the engine)
+    if(data.vu && typeof data.vu === "object"){
+      vu.l = clamp01(Number(data.vu.rms_l || 0) || 0);
+      vu.r = clamp01(Number(data.vu.rms_r || 0) || 0);
+      vu.lpk = clamp01(Number(data.vu.peak_l || 0) || 0);
+      vu.rpk = clamp01(Number(data.vu.peak_r || 0) || 0);
+      setVuUI();
     }
 
     // Producers: the API uses a slightly different field naming than the DEMO tiles.
@@ -918,10 +934,25 @@ function renderLibrary(){
   });
 }
 
+
+function nowPosF(){
+  if(state.apiMode === "LIVE"){
+    const a = state.now || {};
+    const dur = Number(a.dur || 0) || 0;
+    const anchorPos = Number(a._anchorPosF || 0) || 0;
+    const anchorT = Number(a._anchorClientMs || 0) || 0;
+    const elapsed = (performance.now() - anchorT) / 1000;
+    const pos = anchorPos + elapsed;
+    return dur > 0 ? Math.min(dur, Math.max(0, pos)) : Math.max(0, pos);
+  }
+  return Number(state.now.pos || 0) || 0;
+}
+
 function setClock(){
   const d = new Date();
   qs("#clock").textContent = `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
-  const ends = new Date(d.getTime() + (state.now.dur - state.now.pos)*1000);
+  const pos = nowPosF();
+  const ends = new Date(d.getTime() + (state.now.dur - pos)*1000);
   qs("#npEnds").textContent = `Ends ${pad(ends.getHours())}:${pad(ends.getMinutes())}:${pad(ends.getSeconds())}`;
 }
 
@@ -997,6 +1028,7 @@ function setVuUI(){
   if(elRpk) elRpk.textContent = `${vuToDb(vu.rpk).toFixed(0)}`;
 }
 function tickVu(){
+  if(state.apiMode === "LIVE") return; // LIVE meters come from engine PCM analysis
   // Random-ish program audio with smoothing and occasional peaks.
   const base = 0.18 + Math.random()*0.28;  // average program level
   const bump = (Math.random() < 0.08) ? (0.25 + Math.random()*0.25) : 0;
@@ -1016,26 +1048,33 @@ function tickVu(){
 
 function tickNowPlaying(){
   // When connected to the engine API, we do not advance the clock locally.
-  // The engine is the source of truth for pos/dur.
+  // The engine is the source of truth, but we *interpolate* between 1s polls
+  // using a local monotonic clock for a smooth UI.
   if(state.apiMode !== "LIVE"){
-  if(state.log.length === 0){
-    state.log.push(makeNextQueueItem());
-    state.log[0].state = "playing";
-    refillLog();
-    syncNowPlayingFromQueue(false);
-  }
+    if(state.log.length === 0){
+      state.log.push(makeNextQueueItem());
+      state.log[0].state = "playing";
+      refillLog();
+      syncNowPlayingFromQueue(false);
+    }
     state.now.pos += 1;
-  if(state.now.pos >= state.now.dur) advanceQueue("finished");
+    if(state.now.pos >= state.now.dur) advanceQueue("finished");
   }
 
-  const rem = state.now.dur - state.now.pos;
-  qs("#npRemaining").textContent = fmtTime(rem);
-  const [posStr, durStr] = fmtPosDur(state.now.pos, state.now.dur);
+  const posF = nowPosF();
+  const pos = Math.floor(posF);
+  const rem = Math.max(0, (state.now.dur || 0) - posF);
+
+  qs("#npRemaining").textContent = fmtTime(Math.floor(rem));
+  const [posStr, durStr] = fmtPosDur(pos, state.now.dur);
   qs("#npPos").textContent = posStr;
   qs("#npDur").textContent = durStr;
   qs("#npTitle").textContent = state.now.title;
   qs("#npArtist").textContent = state.now.artist;
-  qs("#npBar").style.width = Math.min(100, Math.max(0, (state.now.pos/state.now.dur)*100)).toFixed(1) + "%";
+
+  const dur = state.now.dur || 0;
+  const frac = (dur > 0) ? (posF / dur) : 0;
+  qs("#npBar").style.width = Math.min(100, Math.max(0, frac*100)).toFixed(1) + "%";
 }
 
 function skipNext(){
@@ -1451,7 +1490,7 @@ setClock();
 setVuUI();
 
 setInterval(setClock, 1000);
-setInterval(tickNowPlaying, 1000);
+setInterval(tickNowPlaying, 250);
 setInterval(tickVu, 120);
 setInterval(simulateStatus, 5000);
 
