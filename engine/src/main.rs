@@ -922,6 +922,7 @@ async fn api_webrtc_offer(
     use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSample;
     use webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecCapability;
     use webrtc::media::Sample;
+    use webrtc::data_channel::data_channel_init::RTCDataChannelInit;
 
     // Basic validation: browsers send {type:"offer"}.
     if offer.r#type.to_lowercase() != "offer" {
@@ -1019,6 +1020,95 @@ async fn api_webrtc_offer(
         tracing::warn!("webrtc: add_track failed: {e}");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
+
+    // ---------------------------------------------------------------------
+    // WebRTC data channel: meter alignment with what you *hear*
+    //
+    // Problem:
+    //   Once we added WebRTC audio monitoring, operators may notice that the
+    //   on-screen VU meters lag slightly behind what they hear.
+    //
+    // Why:
+    //   - Audio playout in the browser runs through a jitter buffer and audio
+    //     output scheduling.
+    //   - The existing meters are delivered over HTTP polling (/api/v1/meters)
+    //     and intentionally apply smoothing/ballistics.
+    //   - Those two clocks will never be perfectly phase-aligned.
+    //
+    // Fix:
+    //   When "Listen Live" is active, we also send meter snapshots over a
+    //   WebRTC *data channel* in the same PeerConnection.
+    //
+    //   This gives the UI a low-latency meter stream that shares the same
+    //   transport timing and RTT dynamics as the audio you are monitoring.
+    //
+    // Notes:
+    //   - This is purely an *operator experience* feature.
+    //   - If the data channel fails for any reason, the UI will fall back to
+    //     the existing HTTP polling path.
+    // ---------------------------------------------------------------------
+    let dc = pc
+        .create_data_channel(
+            "meters",
+            Some(RTCDataChannelInit {
+                // Ordered delivery is fine; these are tiny.
+                ordered: Some(true),
+                ..Default::default()
+            }),
+        )
+        .await
+        .map_err(|e| {
+            tracing::warn!("webrtc: create_data_channel(meters) failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    // Start a background meter sender when the channel opens.
+    // We intentionally send at ~50 Hz (20 ms) to match the Opus frame cadence.
+    {
+        let playout = state.playout.clone();
+        let stopped = stopped.clone();
+        let dc_open = dc.clone();
+        dc.on_open(Box::new(move || {
+            let playout = playout.clone();
+            let stopped = stopped.clone();
+            let dc = dc_open.clone();
+            Box::pin(async move {
+                tracing::info!("webrtc: meters data channel open");
+                tokio::spawn(async move {
+                    use std::time::{Duration, Instant};
+                    let t0 = Instant::now();
+                    loop {
+                        if stopped.load(Ordering::SeqCst) {
+                            break;
+                        }
+
+                        // Snapshot the current meter state.
+                        // We keep this lock scope tiny to avoid blocking audio work.
+                        let vu = {
+                            let p = playout.read().await;
+                            p.vu.clone()
+                        };
+
+                        // Include a monotonic timestamp so the UI can detect staleness.
+                        let payload = json!({
+                            "t_ms": t0.elapsed().as_millis() as u64,
+                            "rms_l": vu.rms_l,
+                            "rms_r": vu.rms_r,
+                            "peak_l": vu.peak_l,
+                            "peak_r": vu.peak_r,
+                        })
+                        .to_string();
+
+                        // Best-effort send.
+                        // If the peer disconnects, `stopped` will flip and we exit.
+                        let _ = dc.send_text(payload).await;
+
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                });
+            })
+        }));
+    }
 
 // ---------------------------------------------------------------------
 // WebRTC "keepalive" audio packets (Opus silence)

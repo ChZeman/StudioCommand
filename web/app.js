@@ -10,7 +10,7 @@ const TARGET_LOG_LEN = 12;
 
 // NOTE: UI_VERSION is purely informational (tooltip on the header).
 // The authoritative running version is exposed by the backend at /api/v1/status.
-const UI_VERSION = "0.1.63";
+const UI_VERSION = "0.1.64";
 
 const state = {
   role: "operator",
@@ -71,6 +71,15 @@ const state = {
     lastAt: 0,
     lastError: null,
     formDirty: false,
+  },
+
+  // Listen Live (WebRTC) meter alignment
+  // When the operator is monitoring audio via WebRTC, we can receive meter
+  // snapshots over a WebRTC data channel. This keeps meter timing aligned
+  // with what you *hear* better than HTTP polling.
+  listenLiveMeters: {
+    dcActive: false,
+    lastDcAt: 0,
   },
 };
 
@@ -360,6 +369,13 @@ if(state.flashArmed && Array.isArray(state.flashPrevOrder) && state.flashPrevOrd
 // the full status payload at high frequency.
 async function fetchMeters(){
   if(state.apiMode !== "LIVE") return;
+
+  // If Listen Live is active and we are receiving meter frames over the
+  // WebRTC data channel, prefer those (they are better aligned with audio
+  // playout timing than HTTP polling).
+  if(state.listenLiveMeters.dcActive && (Date.now() - state.listenLiveMeters.lastDcAt) < 2000){
+    return;
+  }
   try{
     const r = await fetch("/api/v1/meters", { cache: "no-store" });
     if(!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -1238,6 +1254,7 @@ function wireUI(){
   // Important: WebRTC audio will only be present when the engine's output
   // pipeline is running (because the PCM source lives there).
   let listenPc = null;
+  let listenDc = null; // WebRTC data channel for meter snapshots (optional)
 
   const setListenStatus = (txt) => {
     const el = qs("#mListenStatus");
@@ -1263,6 +1280,9 @@ function wireUI(){
       }
     }finally{
       listenPc = null;
+      listenDc = null;
+      state.listenLiveMeters.dcActive = false;
+      state.listenLiveMeters.lastDcAt = 0;
       const a = qs("#listenAudio");
       if(a){ a.srcObject = null; }
       const startBtn = qs("#btnListenStart");
@@ -1289,6 +1309,45 @@ function wireUI(){
     const pc = new RTCPeerConnection({
       iceServers: [{ urls: ["stun:stun.l.google.com:19302"] }]
     });
+
+    // Data channel: low-latency meter snapshots.
+    // The engine will create a matching channel labeled "meters".
+    // This channel is optional; if it fails, we silently fall back to
+    // HTTP meter polling.
+    let dc = null;
+    try{
+      dc = pc.createDataChannel("meters");
+      listenDc = dc;
+      dc.onopen = () => {
+        state.listenLiveMeters.dcActive = true;
+        state.listenLiveMeters.lastDcAt = Date.now();
+      };
+      dc.onclose = () => {
+        state.listenLiveMeters.dcActive = false;
+      };
+      dc.onerror = () => {
+        state.listenLiveMeters.dcActive = false;
+      };
+      dc.onmessage = (ev) => {
+        try{
+          const msg = JSON.parse(ev.data);
+          state.listenLiveMeters.lastDcAt = Date.now();
+          updateVuRaw(
+            Number(msg.rms_l || 0) || 0,
+            Number(msg.rms_r || 0) || 0,
+            Number(msg.peak_l || 0) || 0,
+            Number(msg.peak_r || 0) || 0,
+          );
+        }catch(_e){
+          // Ignore parse errors; DC is best-effort.
+        }
+      };
+    }catch(_e){
+      // No data channel support; continue with audio only.
+      dc = null;
+      listenDc = null;
+      state.listenLiveMeters.dcActive = false;
+    }
 
     // Surface WebRTC state transitions in the UI so we can diagnose failures
     // (e.g. ICE stuck in "checking" then "failed").
