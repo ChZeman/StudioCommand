@@ -247,8 +247,6 @@ async function fetchStatus(){
     // - the UI remains usable in DEMO mode when the engine is not running
     state.apiMode = "LIVE";
 
-    state.vuLive = false;
-
     // Playout queue (log)
     state.log = Array.isArray(data.log) ? data.log : [];
 
@@ -291,7 +289,6 @@ if(state.flashArmed && Array.isArray(state.flashPrevOrder) && state.flashPrevOrd
 
     // Live VU meters (derived from PCM in the engine)
     if(data.vu && typeof data.vu === "object"){
-      state.vuLive = true;
       vu.l = clamp01(Number(data.vu.rms_l || 0) || 0);
       vu.r = clamp01(Number(data.vu.rms_r || 0) || 0);
       vu.lpk = clamp01(Number(data.vu.peak_l || 0) || 0);
@@ -1031,7 +1028,7 @@ function setVuUI(){
   if(elRpk) elRpk.textContent = `${vuToDb(vu.rpk).toFixed(0)}`;
 }
 function tickVu(){
-  if(state.apiMode === "LIVE" && state.vuLive) return; // LIVE meters come from engine when available
+  if(state.apiMode === "LIVE") return; // LIVE meters come from engine PCM analysis
   // Random-ish program audio with smoothing and occasional peaks.
   const base = 0.18 + Math.random()*0.28;  // average program level
   const bump = (Math.random() < 0.08) ? (0.25 + Math.random()*0.25) : 0;

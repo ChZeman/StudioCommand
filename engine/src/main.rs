@@ -689,6 +689,16 @@ async fn playout_tick(playout: Arc<tokio::sync::RwLock<PlayoutState>>) {
         // item and padding demo items). To keep SQLite persistence intuitive during
         // development/testing, we also persist the updated queue whenever the
         // "track ends" event occurs.
+        // Update playing position from monotonic clock.
+        if let Some(started) = p.track_started_at {
+            let mut pos_f = started.elapsed().as_secs_f64();
+            if p.now.dur > 0 {
+                pos_f = pos_f.min(p.now.dur as f64);
+            }
+            p.now.pos_f = pos_f;
+            p.now.pos = pos_f.floor() as u32;
+        }
+
         if p.now.pos >= p.now.dur {
             p.now.pos = 0;
     p.now.pos_f = 0.0;
@@ -702,6 +712,9 @@ async fn playout_tick(playout: Arc<tokio::sync::RwLock<PlayoutState>>) {
 
             // Promote new playing item from top of log.
             if let Some(first) = p.log.get_mut(0) {
+                // Anchor timing for UI/progress and any dur-based logic.
+                p.track_started_at = Some(std::time::Instant::now());
+                p.vu = VuLevels::default();
                 // Mark the first log item as playing. We must avoid holding a mutable
                 // borrow of `first` while also mutating `p.now` (Rust borrow rules).
                 first.state = "playing".into();
@@ -759,19 +772,8 @@ async fn status(State(state): State<AppState>) -> Json<StatusResponse> {
 
     let p = state.playout.read().await;
 
-    // Derive position from a monotonic clock instead of tick updates.
-    let mut now = p.now.clone();
-    if let Some(started) = p.track_started_at {
-        let mut pos_f = started.elapsed().as_secs_f64();
-        if now.dur > 0 {
-            pos_f = pos_f.min(now.dur as f64);
-        }
-        now.pos_f = pos_f;
-        now.pos = pos_f.floor() as u32;
-    } else {
-        now.pos_f = 0.0;
-        now.pos = 0;
-    }
+    // now.pos/now.pos_f are maintained in the playout loop using a monotonic clock.
+    let now = p.now.clone();
 
     Json(StatusResponse {
         version: state.version.clone(),
