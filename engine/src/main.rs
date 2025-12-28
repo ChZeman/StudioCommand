@@ -980,15 +980,13 @@ async fn api_webrtc_offer(
         tracing::warn!("webrtc: create_answer failed: {e}");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
-
-    // Wait for ICE gathering to complete so the returned SDP includes candidates.
-    let mut gather_complete = pc.gathering_complete_promise().await;
+    // NOTE: We intentionally do NOT wait for ICE gathering to complete here.
+    // WebRTC supports "trickle ICE" where candidates arrive after the SDP answer.
+    // Waiting for gathering can cause long stalls or timeouts in some environments.
     pc.set_local_description(answer).await.map_err(|e| {
         tracing::warn!("webrtc: set_local_description failed: {e}");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
-    let _ = gather_complete.recv().await;
-
     let local = pc.local_description().await.ok_or_else(|| {
         tracing::warn!("webrtc: local_description missing after set_local_description");
         StatusCode::INTERNAL_SERVER_ERROR

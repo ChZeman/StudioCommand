@@ -10,7 +10,7 @@ const TARGET_LOG_LEN = 12;
 
 // NOTE: UI_VERSION is purely informational (tooltip on the header).
 // The authoritative running version is exposed by the backend at /api/v1/status.
-const UI_VERSION = "0.1.40";
+const UI_VERSION = "0.1.58";
 
 const state = {
   role: "operator",
@@ -1244,6 +1244,17 @@ function wireUI(){
     if(el) el.textContent = txt;
   };
 
+  // Extra low-level WebRTC states, surfaced for debugging:
+  //  - ICE: overall ICE connection state (checking/connected/failed/etc.)
+  //  - Peer: connectionState (new/connecting/connected/disconnected/failed/closed)
+  //  - Signaling: signalingState (stable/have-remote-offer/etc.)
+  //  - Gathering: iceGatheringState (new/gathering/complete)
+  const setListenState = (id, txt) => {
+    const el = qs(id);
+    if(el) el.textContent = txt;
+  };
+
+
   const stopListenLive = async () => {
     try{
       if(listenPc){
@@ -1259,6 +1270,10 @@ function wireUI(){
       if(startBtn) startBtn.disabled = false;
       if(stopBtn)  stopBtn.disabled = true;
       setListenStatus("Stopped");
+      setListenState("#mListenIce","-");
+      setListenState("#mListenPeer","-");
+      setListenState("#mListenSignaling","-");
+      setListenState("#mListenGathering","-");
     }
   };
 
@@ -1274,6 +1289,21 @@ function wireUI(){
     const pc = new RTCPeerConnection({
       iceServers: [{ urls: ["stun:stun.l.google.com:19302"] }]
     });
+
+    // Surface WebRTC state transitions in the UI so we can diagnose failures
+    // (e.g. ICE stuck in "checking" then "failed").
+    const refreshStates = () => {
+      setListenState("#mListenIce", pc.iceConnectionState || "-");
+      setListenState("#mListenPeer", pc.connectionState || "-");
+      setListenState("#mListenSignaling", pc.signalingState || "-");
+      setListenState("#mListenGathering", pc.iceGatheringState || "-");
+    };
+    refreshStates();
+    pc.oniceconnectionstatechange = refreshStates;
+    pc.onconnectionstatechange    = refreshStates;
+    pc.onsignalingstatechange     = refreshStates;
+    pc.onicegatheringstatechange  = refreshStates;
+
     listenPc = pc;
 
     pc.addTransceiver("audio", { direction: "recvonly" });
