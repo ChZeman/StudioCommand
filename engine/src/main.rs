@@ -1556,6 +1556,45 @@ fn parse_dur_seconds(dur: &str) -> Option<u32> {
     Some(m * 60 + s)
 }
 
+fn fmt_dur_mmss(total_s: u32) -> String {
+    let m = total_s / 60;
+    let s = total_s % 60;
+    format!("{}:{:02}", m, s)
+}
+
+fn probe_duration_seconds(path: &str) -> Option<u32> {
+    use std::process::Command;
+
+    let ffprobe = std::env::var("STUDIOCOMMAND_FFPROBE")
+        .unwrap_or_else(|_| "ffprobe".to_string());
+
+    let out = Command::new(ffprobe)
+        .arg("-v").arg("error")
+        .arg("-show_entries").arg("format=duration")
+        .arg("-of").arg("default=noprint_wrappers=1:nokey=1")
+        .arg(path)
+        .output()
+        .ok()?;
+
+    if !out.status.success() {
+        return None;
+    }
+
+    let s = String::from_utf8_lossy(&out.stdout);
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+
+    let secs_f: f64 = s.parse().ok()?;
+    if !secs_f.is_finite() || secs_f <= 0.0 {
+        return None;
+    }
+
+    Some(secs_f.round() as u32)
+}
+
+
 fn normalize_queue_states(log: &mut Vec<LogItem>) {
     normalize_log_markers(log);
     if let Some(first) = log.get_mut(0) {
@@ -1655,7 +1694,14 @@ async fn topup_if_needed(log: &mut Vec<LogItem>, cfg: &TopUpConfig) -> bool {
 
     for i in &picked {
         let path = &files[*i];
-        log.push(LogItem {
+        
+	let dur_s = probe_duration_seconds(path).unwrap_or(0);
+	let dur = if dur_s > 0 { fmt_dur_mmss(dur_s) } else { "0:00".into() };
+	if dur_s == 0 {
+           tracing::warn!("ffprobe duration failed for: {}", path);
+	}
+
+	log.push(LogItem {
             id: Uuid::new_v4(),
             tag: "MUS".into(),
             time: "".into(),
