@@ -3,315 +3,35 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>StudioCommand Playout</title>
-  <link rel="stylesheet" href="./styles.css" />
+  <title>StudioCommand</title>
+  <link rel="stylesheet" href="/shared/base.css" />
 </head>
-<body>
-  <div id="app">
-    <header class="topbar">
-      <div class="brand">
-        <div class="station">StudioCommand</div>
-        <div class="sub">Unified Console • Queue-style log</div>
+<body data-page="landing">
+  <div class="sc-shell">
+    <div class="sc-topbar">
+      <div>
+        <div class="sc-brand">StudioCommand <span class="sc-sub" data-sc-version></span></div>
+        <div class="sc-sub">Choose a workspace</div>
+      </div></div>
+
+    <div class="sc-card">
+      <div class="sc-grid2">
+        <a class="sc-btn" href="/remote">
+          Remote Studio
+          <small>Producer-facing playout UI (queue, now playing, carts, remote producers)</small>
+        </a>
+        <a class="sc-btn" href="/admin">
+          Administration
+          <small>System status, top-up config, library maintenance, streaming output configuration</small>
+        </a>
       </div>
-
-      <div class="clockblock">
-        <div class="clock" id="clock">--:--:--</div>
-        <div class="badges">
-          <span class="badge badge-ok" id="engineBadge" title="Engine status">ENGINE OK</span>
-          <span class="badge badge-ok" id="audioBadge" title="Audio health">AUDIO OK</span>
-          <span class="badge badge-ok" id="streamBadge" title="Streaming status">STREAM OK</span>
-          <span class="badge badge-ok" id="schedBadge" title="Scheduler status">SCHED OK</span>
-          <span class="badge badge-ok" id="remoteBadge" title="Remote contribution status">REMOTE OK</span>
-          <span class="badge badge-demo" id="apiBadge" title="Data source">DEMO</span>
-          <span class="badge badge-mode" id="modeBadge" title="User role">OPERATOR</span>
-          <span class="badge badge-onair" id="onAirBadge" title="Program output">ON AIR</span>
-        </div>
-      </div>
-
-      <div class="top-actions">
-        <button class="btn btn-ghost" id="btnMonitors" title="Open monitoring drawer (M)">Monitors</button>
-        <button class="btn btn-ghost" id="btnLibrary" title="Open library drawer (Ctrl+F / L)">Library</button>
-        <div class="segmented" role="group" aria-label="Role selector">
-          <button class="seg active" data-role="operator">Operator</button>
-          <button class="seg" data-role="producer">Producer</button>
-        </div>
-      </div>
-    </header>
-
-    <main class="layout" id="layout">
-      <section class="panel log">
-        <div class="panel-title">
-          <div>Playout Queue</div>
-          <div class="panel-meta-actions">
-            <div class="panel-meta">Played items disappear</div>
-            <button class="btn btn-ghost btn-mini" id="btnUndoReorder" title="Undo last reorder (Ctrl/Cmd+Z)" disabled>Undo</button>
-          </div>
-        </div>
-        <div class="log-list" id="logList"></div>
-      </section>
-
-      <section class="panel center">
-        <div class="now-playing">
-          <div class="np-header">
-            <div class="np-title">Now Playing</div>
-            <div class="np-sub" id="npSub">Automation • Segue: AutoFade 2.0s</div>
-          </div>
-          <div class="np-body">
-            <div class="np-time">
-              <div class="np-remaining" id="npRemaining">02:13</div>
-              <div class="np-ends" id="npEnds">Ends --:--:--</div>
-            </div>
-            <div class="np-track">
-              <div class="np-track-title" id="npTitle">Lean On Me</div>
-              <div class="np-track-artist" id="npArtist">Club Nouveau</div>
-              <div class="np-progress">
-                <div class="bar"><div class="bar-fill" id="npBar"></div></div>
-                <div class="bar-meta">
-                  <span id="npPos">1:35</span>
-                  <span id="npDur">3:48</span>
-                </div>
-              </div>
-
-              <div class="vu" aria-label="Program audio level">
-                <div class="vu-head">
-                  <span>VU</span>
-                  <span class="vu-mini" id="vuDb">-12 dB</span>
-                </div>
-                <div class="vu-rows">
-                  <div class="vu-row">
-                    <span class="vu-ch">L</span>
-                    <div class="vu-track"><div class="vu-fill" id="vuL"></div></div>
-                    <span class="vu-peak" id="vuLpk">-9</span>
-                  </div>
-                  <div class="vu-row">
-                    <span class="vu-ch">R</span>
-                    <div class="vu-track"><div class="vu-fill" id="vuR"></div></div>
-                    <span class="vu-peak" id="vuRpk">-9</span>
-                  </div>
-                </div>
-              </div>
-            </div>
-            <div class="np-controls">
-              <button class="btn btn-secondary" id="btnSkip">Skip</button>
-              <button class="btn btn-danger" id="btnDump">Dump</button>
-              <button class="btn btn-secondary" id="btnReload">Reload</button>
-              <button class="btn btn-primary" id="btnTalk">Talk</button>
-            </div>
-          </div>
-        </div>
-
-        <div class="mid-grid">
-          <section class="panel nested carts">
-            <div class="panel-title">
-              <div>Carts</div>
-              <div class="panel-meta">Hotkeys</div>
-            </div>
-            <div class="cart-tabs">
-              <button class="tab active" data-tab="jingles">Jingles</button>
-              <button class="tab" data-tab="beds">Beds</button>
-              <button class="tab" data-tab="sfx">SFX</button>
-              <button class="tab" data-tab="ads">Ads</button>
-            </div>
-            <div class="cart-grid" id="cartGrid"></div>
-          </section>
-        </div>
-      </section>
-
-      <aside class="panel right">
-        <div class="panel-title">
-          <div>Remote</div>
-          <div class="panel-meta">Always visible</div>
-        </div>
-
-        <!--
-          Right rail redesign (v0.1.66)
-
-          The previous layout used the entire panel for "Remote Producers".
-          Operators asked for more vertical real-estate, so we split the right rail
-          into compact, clearly-scoped sections.
-
-          1) Remote Producers: contribution status + quick actions
-          2) Control Panel: operator utilities (first: one-click Listen Live)
-        -->
-
-        <section class="panel nested side-sub remote-producers">
-          <div class="panel-title panel-title-compact">
-            <div>Remote Producers</div>
-            <div class="panel-meta">Compact</div>
-          </div>
-          <div class="producers producers-compact" id="producerTiles"></div>
-          <div class="right-actions">
-            <button class="btn btn-secondary w100" id="btnTalkbackAll">Talkback All</button>
-            <button class="btn btn-secondary w100" id="btnInvite">Invite</button>
-          </div>
-        </section>
-
-        <section class="panel nested side-sub control-panel">
-          <div class="panel-title panel-title-compact">
-            <div>Control Panel</div>
-            <div class="panel-meta">Operator</div>
-          </div>
-          <div class="side-controls">
-            <button class="btn btn-primary w100" id="btnLiveAudio">Start Audio</button>
-          </div>
-        </section>
-      </aside>
-    </main>
-
-    <!-- Library Drawer -->
-    <div class="drawer drawer-right" id="libraryDrawer" aria-hidden="true">
-      <div class="drawer-header">
-        <div>
-          <div class="drawer-title">Music Library</div>
-          <div class="drawer-sub">Search • Filter • Add to queue</div>
-        </div>
-        <button class="btn btn-ghost" id="closeLibrary" aria-label="Close library">✕</button>
-      </div>
-      <div class="drawer-body">
-        <div class="field-row">
-          <input class="input" id="libSearch" placeholder="Search title, artist, code…" />
-          <button class="btn btn-secondary" id="libClear">Clear</button>
-        </div>
-        <div class="field-row">
-          <select class="select" id="libType">
-            <option>All Types</option><option>Music</option><option>Jingles</option><option>Ads</option><option>Voice Tracks</option><option>SFX</option>
-          </select>
-          <select class="select" id="libCat">
-            <option>All Categories</option><option>A</option><option>B</option><option>C</option><option>Gold</option><option>Recurrent</option>
-          </select>
-        </div>
-        <div class="list" id="libResults"></div>
-      </div>
-      <div class="drawer-footer">
-        <button class="btn btn-primary" id="libAdd">Add to Queue</button>
-        <button class="btn btn-secondary" id="libPreview">Preview</button>
+      <hr style="border:0;border-top:1px solid var(--border);margin:16px 0;" />
+      <div class="sc-sub">
+        Tip: bookmark <strong>/remote</strong> for producers and <strong>/admin</strong> for staff.
       </div>
     </div>
-
-    <!-- Monitors Drawer -->
-    <div class="drawer drawer-bottom" id="monitorsDrawer" aria-hidden="true">
-      <div class="drawer-header">
-        <div>
-          <div class="drawer-title">Monitors</div>
-          <div class="drawer-sub">Engine • Audio • Streaming • Remote quality
-          <div class="mon-card">
-            <div class="mon-title">Listen Live</div>
-            <div class="mon-row"><span>Status</span><span id="mListenStatus">Stopped</span></div>
-            <div class="mon-row"><span>ICE</span><span id="mListenIce" class="mono muted">-</span></div>
-            <div class="mon-row"><span>Peer</span><span id="mListenPeer" class="mono muted">-</span></div>
-            <div class="mon-row"><span>Signaling</span><span id="mListenSignaling" class="mono muted">-</span></div>
-            <div class="mon-row"><span>Gathering</span><span id="mListenGathering" class="mono muted">-</span></div>
-
-            <!--
-              Meter source visibility (v0.1.65)
-
-              When Listen Live is active, the UI can receive meter snapshots over a WebRTC
-              data channel. This keeps meter timing closer to what the operator hears.
-              If the data channel goes quiet (or Listen Live is stopped), we fall back to
-              HTTP polling via /api/v1/meters.
-            -->
-            <div class="mon-row"><span>Meters</span><span id="mListenMeters" class="mono muted">-</span></div>
-            <div class="mon-row"><span>Meter age</span><span id="mListenMeterAge" class="mono muted">-</span></div>
-
-            <div class="mon-row"><span>Notes</span><span class="muted">WebRTC • Opus • low-latency</span></div>
-            <div class="mon-actions" style="display:flex; gap:8px; margin-top:10px;">
-              <button class="btn" id="btnListenStart">Start</button>
-              <button class="btn btn-ghost" id="btnListenStop" disabled>Stop</button>
-            </div>
-            <audio id="listenAudio" autoplay playsinline></audio>
-          </div>
-</div>
-        </div>
-        <button class="btn btn-ghost" id="closeMonitors" aria-label="Close monitors">✕</button>
-      </div>
-      <div class="drawer-body monitors">
-        <div class="mon-grid">
-          <div class="mon-card">
-            <div class="mon-title">Engine</div>
-            <div class="mon-row"><span>Uptime</span><span id="mUptime">3d 04h</span></div>
-            <div class="mon-row"><span>CPU</span><span id="mCpu">12%</span></div>
-            <div class="mon-row"><span>Disk</span><span id="mDisk">78% free</span></div>
-          </div>
-          <div class="mon-card">
-            <div class="mon-title">Audio</div>
-            <div class="mon-row"><span>Underruns</span><span id="mUnderruns">0</span></div>
-            <div class="mon-row"><span>Silence detect</span><span id="mSilence">Off</span></div>
-            <div class="mon-row"><span>Output</span><span id="mOutput">Studio Out</span></div>
-          </div>
-          <div class="mon-card">
-            <div class="mon-title">Streaming</div>
-            <div class="mon-row"><span>Status</span><span class="ok" id="mStream">Connected</span></div>
-            <div class="mon-row"><span>Codec</span><span id="mCodec">AAC 128k</span></div>
-            <div class="mon-row"><span>Metadata</span><span id="mMeta">OK</span></div>
-          </div>
-          <div class="mon-card">
-            <div class="mon-title">Remote</div>
-            <div class="mon-row"><span>Worst jitter</span><span id="mJitter">18ms</span></div>
-            <div class="mon-row"><span>Worst loss</span><span id="mLoss">0.7%</span></div>
-            <div class="mon-row"><span>Mode</span><span id="mPriority">Normal (A+V)</span></div>
-          </div>
-        </div>
-
-        <div class="mon-config">
-          <div class="mon-title">Streaming Output (Icecast)</div>
-          <div class="form-grid">
-            <label class="field">
-              <span>Host</span>
-              <input class="input" id="outHost" placeholder="seahorse.juststreamwith.us" />
-            </label>
-            <label class="field">
-              <span>Port</span>
-              <input class="input" id="outPort" placeholder="8006" />
-            </label>
-            <label class="field">
-              <span>Mount</span>
-              <input class="input" id="outMount" placeholder="/studiocommand" />
-            </label>
-            <label class="field">
-              <span>Username</span>
-              <input class="input" id="outUser" placeholder="source" />
-            </label>
-            <label class="field">
-              <span>Password</span>
-              <input class="input" id="outPass" type="password" placeholder="••••••••" />
-            </label>
-            <label class="field">
-              <span>Codec</span>
-              <select class="select" id="outCodec">
-                <option value="mp3">MP3</option>
-                <option value="aac">AAC</option>
-              </select>
-            </label>
-            <label class="field">
-              <span>Bitrate (kbps)</span>
-              <input class="input" id="outBitrate" placeholder="128" />
-            </label>
-            <label class="field field-check">
-              <span>Auto-start on boot</span>
-              <input type="checkbox" id="outEnabled" />
-            </label>
-          </div>
-          <div class="form-actions">
-            <button class="btn btn-secondary" id="btnOutSave">Save</button>
-            <button class="btn btn-primary" id="btnOutStart">Start</button>
-            <button class="btn btn-danger" id="btnOutStop">Stop</button>
-            <div class="form-status">
-              <div id="outStatusText">Status: —</div>
-              <div class="mono">Listener URL: <span id="outListenerUrl">—</span></div>
-            </div>
-          </div>
-        </div>
-        <div class="alarms">
-          <div class="mon-title">Alarms</div>
-          <div class="alarm ok">No active alarms</div>
-        </div>
-      </div>
-    </div>
-    </div>
-
-    <div class="scrim" id="scrim" hidden></div>
   </div>
 
-  <script src="./app.js?v=0.1.84"></script>
+  <script src="/shared/base.js"></script>
 </body>
 </html>

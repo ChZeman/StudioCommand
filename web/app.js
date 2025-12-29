@@ -6,11 +6,19 @@
 const qs = (s) => document.querySelector(s);
 const qsa = (s) => Array.from(document.querySelectorAll(s));
 
+// Page mode (v0.1.85)
+// We now serve multiple entrypoints:
+//   /remote -> producer UI
+//   /admin  -> administration UI
+//
+// The same app.js is shared, but each page boots only the features it needs.
+const SC_PAGE = (document.body && document.body.dataset && document.body.dataset.page) ? document.body.dataset.page : 'remote';
+
 const TARGET_LOG_LEN = 12;
 
 // NOTE: UI_VERSION is purely informational (tooltip on the header).
 // The authoritative running version is exposed by the backend at /api/v1/status.
-const UI_VERSION = "0.1.84";
+const UI_VERSION = "0.1.85";
 
 const state = {
   role: "operator",
@@ -585,19 +593,30 @@ function moveWithinUpcomingRelative(upcoming, fromIdx, toIdx, insertAfter){
 // We keep rendering centralized so LIVE polling can safely trigger updates.
 // This also makes it easier to pause queue re-renders during drag gestures.
 function renderAll(){
+  // Render only the widgets that exist on the current page.
+  // This keeps app.js safe to reuse across /remote and /admin.
   renderApiBadge();
-  renderUndoButton();
-  renderLog();
-  renderProducers();
-  renderLibrary();
-  renderCarts();
-  // Now-playing/VU are already driven by tickNowPlaying/tickVu, but the initial
-  // paint still benefits from re-rendering derived fields.
-  setVuUI();
+
+  if(SC_PAGE === 'remote'){
+    renderUndoButton();
+    renderLog();
+    renderProducers();
+    renderLibrary();
+    renderCarts();
+    // Now-playing/VU are already driven by tickNowPlaying/tickVu, but the initial
+    // paint still benefits from re-rendering derived fields.
+    setVuUI();
+  }else if(SC_PAGE === 'admin'){
+    // Admin currently focuses on system/streaming configuration panels.
+    // Streaming panel is updated via fetchOutput() -> renderStreaming().
+    // We still call setVuUI() if VU widgets exist (optional future enhancement).
+    setVuUI();
+  }
 }
 
 function renderLog(){
   const el = qs("#logList");
+  if(!el) return;
   el.innerHTML = "";
 
   // Render rows. We keep this function pure (no network calls, no event wiring).
@@ -927,6 +946,7 @@ function wireQueueInteractionHandlers(){
 
 function renderProducers(){
   const el = qs("#producerTiles");
+  if(!el) return;
   el.innerHTML = "";
   state.producers.forEach(p => {
     const row = document.createElement("div");
@@ -1894,37 +1914,67 @@ function wireTransportControls(){
 }
 
 
-initData();
-setHeaderVersion();
-setApiBadge("DEMO");
-wireTransportControls();
-wireStreamingControls();
-fetchStatus();
-// Poll status more frequently in LIVE mode so meters/progress feel responsive.
-// (The payload is small; this also avoids "stale"-looking VU updates.)
-// Status is relatively heavy; poll it slowly.
-setInterval(fetchStatus, 1000);
-// Meters are tiny; poll them fast for responsive UI.
-setInterval(fetchMeters, 120);
 
-// Listen Live (WebRTC) meter-source indicator.
-// This tick is UI-only and safe in both DEMO and LIVE modes.
-setInterval(tickListenLiveUi, 200);
-renderApiBadge();
-wireUI();
-wireLogDelegatedHandlers();
-applyRole();
-renderLog();
-renderLibrary();
-renderCarts();
-renderProducers();
-setClock();
-setVuUI();
+function bootRemote(){
+  initData();
+  setHeaderVersion();
+  setApiBadge('DEMO');
+  wireTransportControls();
+  wireStreamingControls();
+  fetchStatus();
 
-setInterval(setClock, 1000);
-setInterval(tickNowPlaying, 250);
-setInterval(tickVu, 120);
-setInterval(simulateStatus, 5000);
+  // Poll status more frequently in LIVE mode so meters/progress feel responsive.
+  // Status is relatively heavy; poll it slowly.
+  setInterval(fetchStatus, 1000);
+  // Meters are tiny; poll them fast for responsive UI.
+  setInterval(fetchMeters, 120);
+
+  // Listen Live (WebRTC) meter-source indicator.
+  setInterval(tickListenLiveUi, 200);
+
+  renderApiBadge();
+  wireUI();
+  wireLogDelegatedHandlers();
+  applyRole();
+  renderLog();
+  renderLibrary();
+  renderCarts();
+  renderProducers();
+  setClock();
+  setVuUI();
+
+  setInterval(setClock, 1000);
+  setInterval(tickNowPlaying, 250);
+  setInterval(tickVu, 120);
+  setInterval(simulateStatus, 5000);
+}
+
+function bootAdmin(){
+  // Admin page focuses on system status + configuration.
+  // We intentionally do NOT wire producer UI controls, queue interaction, or hotkeys here.
+  initData();
+  setHeaderVersion();
+  setApiBadge('DEMO');
+
+  // Streaming output controls live here.
+  wireStreamingControls();
+
+  // Pull engine status + streaming state.
+  fetchStatus();
+  setInterval(fetchStatus, 1000);
+
+  // Keep the header clock alive on the admin page too.
+  setClock();
+  setInterval(setClock, 1000);
+
+  // Optional: if VU widgets exist on admin in the future, meters will work.
+  setInterval(fetchMeters, 200);
+}
+
+// Boot the appropriate UI entrypoint.
+// Default to remote so older deployments remain usable.
+if(SC_PAGE === 'admin') bootAdmin();
+else bootRemote();
 
 function setApiBadge(mode, detail){
   const el = qs("#apiBadge");

@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>StudioCommand — Remote Studio</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body data-page="remote">
+  <div id="app">
+    <header class="topbar">
+      <div class="brand">
+        <div class="station" id="hdrTitle">StudioCommand</div>
+        <div class="sub">Remote Studio • Producer playout</div>
+      </div>
+
+      <div class="clockblock">
+        <div class="clock" id="clock">--:--:--</div>
+        <div class="badges">
+          <span class="badge badge-ok" id="remoteBadge" title="Remote contribution status">REMOTE OK</span>
+          <span class="badge badge-demo" id="apiBadge" title="Data source">DEMO</span>
+          <span class="badge badge-mode" id="modeBadge" title="User role">OPERATOR</span>
+          <span class="badge badge-onair" id="onAirBadge" title="Program output">ON AIR</span>
+        </div>
+      </div>
+
+      <div class="top-actions">
+        <button class="btn btn-ghost" id="btnMonitors" title="Open monitoring drawer (M)">Monitor</button>
+        <button class="btn btn-ghost" id="btnLibrary" title="Open library drawer (Ctrl+F / L)">Library</button>
+        <a class="btn btn-ghost" href="/admin" title="Administration">Admin</a>
+        <div class="segmented" role="group" aria-label="Role selector">
+          <button class="seg active" data-role="operator">Operator</button>
+          <button class="seg" data-role="producer">Producer</button>
+        </div>
+      </div>
+    </header>
+
+    <main class="layout" id="layout">
+      <section class="panel log">
+        <div class="panel-title">
+          <div>Playout Queue</div>
+          <div class="panel-meta-actions">
+            <div class="panel-meta">Played items disappear</div>
+            <button class="btn btn-ghost btn-mini" id="btnUndoReorder" title="Undo last reorder (Ctrl/Cmd+Z)" disabled>Undo</button>
+          </div>
+        </div>
+        <div class="log-list" id="logList"></div>
+      </section>
+
+      <section class="panel center">
+        <div class="now-playing">
+          <div class="np-header">
+            <div class="np-title">Now Playing</div>
+            <div class="np-sub" id="npSub">Automation</div>
+          </div>
+          <div class="np-body">
+            <div class="np-time">
+              <div class="np-remaining" id="npRemaining">--:--</div>
+              <div class="np-ends" id="npEnds">Ends --:--:--</div>
+            </div>
+            <div class="np-track">
+              <div class="np-track-title" id="npTitle">—</div>
+              <div class="np-track-artist" id="npArtist">—</div>
+              <div class="np-progress">
+                <div class="bar"><div class="bar-fill" id="npBar"></div></div>
+                <div class="bar-meta"><span id="npPos">0:00</span><span id="npDur">0:00</span></div>
+              </div>
+
+              <div class="vu" aria-label="Program audio level">
+                <div class="vu-head"><span>VU</span><span class="vu-mini" id="vuDb">-- dB</span></div>
+                <div class="vu-rows">
+                  <div class="vu-row"><span class="vu-ch">L</span><div class="vu-track"><div class="vu-fill" id="vuL"></div></div><span class="vu-peak" id="vuLpk">--</span></div>
+                  <div class="vu-row"><span class="vu-ch">R</span><div class="vu-track"><div class="vu-fill" id="vuR"></div></div><span class="vu-peak" id="vuRpk">--</span></div>
+                </div>
+              </div>
+            </div>
+            <div class="np-controls">
+              <button class="btn btn-secondary" id="btnSkip">Skip</button>
+              <button class="btn btn-danger" id="btnDump">Dump</button>
+              <button class="btn btn-secondary" id="btnReload">Reload</button>
+              <button class="btn btn-primary" id="btnTalk">Talk</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="mid-grid">
+          <section class="panel nested carts">
+            <div class="panel-title"><div>Carts</div><div class="panel-meta">Hotkeys</div></div>
+            <div class="cart-tabs">
+              <button class="tab active" data-tab="jingles">Jingles</button>
+              <button class="tab" data-tab="beds">Beds</button>
+              <button class="tab" data-tab="sfx">SFX</button>
+              <button class="tab" data-tab="ads">Ads</button>
+            </div>
+            <div class="cart-grid" id="cartGrid"></div>
+          </section>
+        </div>
+      </section>
+
+      <aside class="panel right">
+        <div class="panel-title"><div>Remote</div><div class="panel-meta">Always visible</div></div>
+
+        <section class="panel nested side-sub remote-producers">
+          <div class="panel-title panel-title-compact"><div>Remote Producers</div><div class="panel-meta">Compact</div></div>
+          <div class="producers producers-compact" id="producerTiles"></div>
+          <div class="right-actions">
+            <button class="btn btn-secondary w100" id="btnTalkbackAll">Talkback All</button>
+            <button class="btn btn-secondary w100" id="btnInvite">Invite</button>
+          </div>
+        </section>
+
+        <section class="panel nested side-sub control-panel">
+          <div class="panel-title panel-title-compact"><div>Control Panel</div><div class="panel-meta">Operator</div></div>
+          <div class="side-controls">
+            <button class="btn btn-primary w100" id="btnLiveAudio">Start Audio</button>
+          </div>
+        </section>
+      </aside>
+    </main>
+
+    <!-- Library Drawer -->
+    <div class="drawer drawer-right" id="libraryDrawer" aria-hidden="true">
+      <div class="drawer-header">
+        <div><div class="drawer-title">Music Library</div><div class="drawer-sub">Search • Add to queue</div></div>
+        <button class="btn btn-ghost" id="closeLibrary" aria-label="Close library">✕</button>
+      </div>
+      <div class="drawer-body">
+        <div class="field-row">
+          <input class="input" id="libSearch" placeholder="Search title, artist, code…" />
+          <button class="btn btn-secondary" id="libClear">Clear</button>
+        </div>
+        <div class="field-row">
+          <select class="select" id="libType"><option>All Types</option><option>Music</option><option>Jingles</option><option>Ads</option><option>Voice Tracks</option><option>SFX</option></select>
+          <select class="select" id="libCat"><option>All Categories</option><option>A</option><option>B</option><option>C</option><option>Gold</option><option>Recurrent</option></select>
+        </div>
+        <div class="list" id="libResults"></div>
+      </div>
+      <div class="drawer-footer">
+        <button class="btn btn-primary" id="libAdd">Add to Queue</button>
+        <button class="btn btn-secondary" id="libPreview">Preview</button>
+      </div>
+    </div>
+
+    <!-- Monitor Drawer (Listen Live only; system/config moved to /admin) -->
+    <div class="drawer drawer-bottom" id="monitorsDrawer" aria-hidden="true">
+      <div class="drawer-header">
+        <div>
+          <div class="drawer-title">Monitor</div>
+          <div class="drawer-sub">Listen Live (WebRTC)</div>
+          <div class="mon-card">
+            <div class="mon-title">Listen Live</div>
+            <div class="mon-row"><span>Status</span><span id="mListenStatus">Stopped</span></div>
+            <div class="mon-row"><span>ICE</span><span id="mListenIce" class="mono muted">-</span></div>
+            <div class="mon-row"><span>Peer</span><span id="mListenPeer" class="mono muted">-</span></div>
+            <div class="mon-row"><span>Signaling</span><span id="mListenSignaling" class="mono muted">-</span></div>
+            <div class="mon-row"><span>Gathering</span><span id="mListenGathering" class="mono muted">-</span></div>
+            <div class="mon-row"><span>Meters</span><span id="mListenMeters" class="mono muted">-</span></div>
+            <div class="mon-row"><span>Meter age</span><span id="mListenMeterAge" class="mono muted">-</span></div>
+            <div class="mon-actions" style="display:flex; gap:8px; margin-top:10px;">
+              <button class="btn" id="btnListenStart">Start</button>
+              <button class="btn btn-ghost" id="btnListenStop" disabled>Stop</button>
+            </div>
+            <audio id="listenAudio" autoplay playsinline></audio>
+          </div>
+        </div>
+        <button class="btn btn-ghost" id="closeMonitors" aria-label="Close monitors">✕</button>
+      </div>
+      <div class="drawer-body monitors">
+        <div class="alarms">
+          <div class="mon-title">Notes</div>
+          <div class="alarm ok">System status and configuration panels are available in <a class="muted" href="/admin">Administration</a>.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="scrim" id="scrim" hidden></div>
+  </div>
+
+  <script src="./app.js?v=0.1.85"></script>
+</body>
+</html>

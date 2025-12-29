@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>StudioCommand — Administration</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body data-page="admin">
+  <div id="app">
+    <header class="topbar">
+      <div class="brand">
+        <div class="station" id="hdrTitle">StudioCommand</div>
+        <div class="sub">Administration • System & Configuration</div>
+      </div>
+
+      <div class="clockblock">
+        <div class="clock" id="clock">--:--:--</div>
+        <div class="badges">
+          <span class="badge badge-ok" id="engineBadge" title="Engine status">ENGINE OK</span>
+          <span class="badge badge-ok" id="audioBadge" title="Audio health">AUDIO OK</span>
+          <span class="badge badge-ok" id="streamBadge" title="Streaming status">STREAM OK</span>
+          <span class="badge badge-ok" id="schedBadge" title="Scheduler status">SCHED OK</span>
+          <span class="badge badge-demo" id="apiBadge" title="Data source">DEMO</span>
+          <span class="badge badge-mode" id="modeBadge" title="User role">ADMIN</span>
+        </div>
+      </div>
+
+      <div class="top-actions">
+        <a class="btn btn-ghost" href="/remote" title="Go to Remote Studio">Remote Studio</a>
+      </div>
+    </header>
+
+    <main class="layout" id="layout" style="grid-template-columns: 1fr;">
+      <section class="panel" style="min-width:0;">
+        <div class="panel-title">
+          <div>System Status</div>
+          <div class="panel-meta">Engine • Audio • Streaming • Remote health</div>
+        </div>
+
+        <div class="mon-grid" style="margin-top:12px;">
+          <div class="mon-card">
+            <div class="mon-title">Engine</div>
+            <div class="mon-row"><span>Uptime</span><span id="mUptime">—</span></div>
+            <div class="mon-row"><span>CPU</span><span id="mCpu">—</span></div>
+            <div class="mon-row"><span>Disk</span><span id="mDisk">—</span></div>
+          </div>
+          <div class="mon-card">
+            <div class="mon-title">Audio</div>
+            <div class="mon-row"><span>Underruns</span><span id="mUnderruns">—</span></div>
+            <div class="mon-row"><span>Silence detect</span><span id="mSilence">—</span></div>
+            <div class="mon-row"><span>Output</span><span id="mOutput">—</span></div>
+          </div>
+          <div class="mon-card">
+            <div class="mon-title">Streaming</div>
+            <div class="mon-row"><span>Status</span><span class="ok" id="mStream">—</span></div>
+            <div class="mon-row"><span>Codec</span><span id="mCodec">—</span></div>
+            <div class="mon-row"><span>Metadata</span><span id="mMeta">—</span></div>
+          </div>
+          <div class="mon-card">
+            <div class="mon-title">Remote</div>
+            <div class="mon-row"><span>Worst jitter</span><span id="mJitter">—</span></div>
+            <div class="mon-row"><span>Worst loss</span><span id="mLoss">—</span></div>
+            <div class="mon-row"><span>Mode</span><span id="mPriority">—</span></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel" style="min-width:0;">
+        <div class="panel-title">
+          <div>Streaming Output (Icecast)</div>
+          <div class="panel-meta">Moved from producer UI</div>
+        </div>
+
+        <div class="mon-config" style="margin-top:12px;">
+          <div class="form-grid">
+            <label class="field"><span>Host</span><input class="input" id="outHost" placeholder="seahorse.juststreamwith.us" /></label>
+            <label class="field"><span>Port</span><input class="input" id="outPort" placeholder="8006" /></label>
+            <label class="field"><span>Mount</span><input class="input" id="outMount" placeholder="/studiocommand" /></label>
+            <label class="field"><span>Username</span><input class="input" id="outUser" placeholder="source" /></label>
+            <label class="field"><span>Password</span><input class="input" id="outPass" type="password" placeholder="••••••••" /></label>
+            <label class="field"><span>Codec</span>
+              <select class="select" id="outCodec"><option value="mp3">MP3</option><option value="aac">AAC</option></select>
+            </label>
+            <label class="field"><span>Bitrate (kbps)</span><input class="input" id="outBitrate" placeholder="128" /></label>
+            <label class="field field-check"><span>Auto-start on boot</span><input type="checkbox" id="outEnabled" /></label>
+          </div>
+          <div class="form-actions">
+            <button class="btn btn-secondary" id="btnOutSave">Save</button>
+            <button class="btn btn-primary" id="btnOutStart">Start</button>
+            <button class="btn btn-danger" id="btnOutStop">Stop</button>
+            <div class="form-status">
+              <div id="outStatusText">Status: —</div>
+              <div class="mono">Listener URL: <span id="outListenerUrl">—</span></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel" style="min-width:0;">
+        <div class="panel-title">
+          <div>Top-up Configuration</div>
+          <div class="panel-meta">Admin-only</div>
+        </div>
+        <div class="panel-body">
+          <div class="muted">
+            This section is reserved for top-up rules (auto-fill sources, target queue depth, and category weighting).
+            The engine already performs top-up; the admin UI wiring will land here next.
+          </div>
+        </div>
+      </section>
+
+      <section class="panel" style="min-width:0;">
+        <div class="panel-title">
+          <div>Library Maintenance</div>
+          <div class="panel-meta">Scan • repair • housekeeping</div>
+        </div>
+        <div class="panel-body">
+          <div class="muted">
+            This section is reserved for library scanning / maintenance tools (rescan, rebuild metadata, and consistency checks).
+            UI will be connected to engine endpoints as they are added.
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <div class="scrim" id="scrim" hidden></div>
+  </div>
+
+  <script src="./app.js?v=0.1.85"></script>
+</body>
+</html>
