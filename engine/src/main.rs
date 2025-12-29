@@ -32,6 +32,7 @@ struct AppState {
     sys: Arc<tokio::sync::Mutex<System>>,
     playout: Arc<tokio::sync::RwLock<PlayoutState>>,
     topup: Arc<tokio::sync::Mutex<TopUpConfig>>,
+    topup_stats: Arc<tokio::sync::Mutex<TopUpStats>>,
     output: Arc<tokio::sync::Mutex<OutputRuntime>>,
 
     // Broadcast of real-time PCM chunks (s16le stereo @ 48 kHz).
@@ -121,6 +122,28 @@ struct TopUpConfig {
     dir: String,
     min_queue: u16,
     batch: u16,
+}
+
+/// Runtime visibility for top-up.
+///
+/// Top-up is an automation feature and when it fails (missing directory,
+/// permission issues, unsupported formats, empty folder, etc.) it can leave the
+/// playout queue empty with no obvious UI indication.
+///
+/// We keep small, operator-friendly telemetry so we can surface it via API and
+/// (later) the UI.
+#[derive(Clone, Serialize, Default)]
+struct TopUpStats {
+    /// Unix millis of the last scan attempt.
+    last_scan_ms: Option<u64>,
+    /// The directory that was scanned (may be a fallback).
+    last_dir: Option<String>,
+    /// How many candidate audio files were discovered.
+    last_files_found: Option<u32>,
+    /// How many items were appended.
+    last_appended: Option<u32>,
+    /// Human-friendly last error string.
+    last_error: Option<String>,
 }
 
 
@@ -635,6 +658,14 @@ struct StatusResponse {
     version: String,
     now: NowPlaying,
     vu: VuLevels,
+    /// Back-compat alias for the UI.
+    ///
+    /// The UI historically used `queue` while the engine used `log`.
+    /// Some UI builds treat a missing `queue` as a fatal parse error and
+    /// fall back to DEMO mode.
+    ///
+    /// We now serve both fields, pointing to the same underlying vector.
+    queue: Vec<LogItem>,
     log: Vec<LogItem>,
     producers: Vec<ProducerStatus>,
     system: SystemInfo,
@@ -688,6 +719,7 @@ let state = AppState {
     sys: Arc::new(tokio::sync::Mutex::new(sys)),
     playout: Arc::new(tokio::sync::RwLock::new(playout)),
     topup: Arc::new(tokio::sync::Mutex::new(topup_cfg)),
+    topup_stats: Arc::new(tokio::sync::Mutex::new(TopUpStats::default())),
     output: Arc::new(tokio::sync::Mutex::new(OutputRuntime::new(output_cfg))),
     pcm_tx,
     webrtc: Arc::new(tokio::sync::Mutex::new(None)),
@@ -699,11 +731,12 @@ let state = AppState {
     let out = state.output.clone();
     let pl = state.playout.clone();
     let tu = state.topup.clone();
-		let pcm_tx = state.pcm_tx.clone();
+			let pcm_tx = state.pcm_tx.clone();
+			let tu_stats = state.topup_stats.clone();
     let enabled = out.lock().await.config.enabled;
     if enabled {
         tokio::spawn(async move {
-				let _ = output_start_internal(out, pl, tu, pcm_tx).await;
+				let _ = output_start_internal(out, pl, tu, tu_stats, pcm_tx).await;
         });
     }
 }
@@ -873,6 +906,8 @@ async fn status(State(state): State<AppState>) -> Json<StatusResponse> {
         version: state.version.clone(),
         now,
         vu: p.vu.clone(),
+        // Back-compat: serve both `queue` and `log`.
+        queue: p.log.clone(),
         log: p.log.clone(),
         producers: p.producers.clone(),
         system,
@@ -1604,7 +1639,13 @@ async fn api_output_set_config(
 }
 
 async fn api_output_start(State(state): State<AppState>) -> Result<Json<serde_json::Value>, StatusCode> {
-    output_start_internal(state.output.clone(), state.playout.clone(), state.topup.clone(), state.pcm_tx.clone()).await?;
+    output_start_internal(
+        state.output.clone(),
+        state.playout.clone(),
+        state.topup.clone(),
+        state.topup_stats.clone(),
+        state.pcm_tx.clone(),
+    ).await?;
     Ok(Json(json!({"ok": true})))
 }
 
@@ -1617,6 +1658,7 @@ async fn output_start_internal(
     output: Arc<tokio::sync::Mutex<OutputRuntime>>,
     playout: Arc<tokio::sync::RwLock<PlayoutState>>,
     topup: Arc<tokio::sync::Mutex<TopUpConfig>>,
+    topup_stats: Arc<tokio::sync::Mutex<TopUpStats>>,
     pcm_tx: tokio::sync::broadcast::Sender<Vec<u8>>,
 ) -> Result<(), StatusCode> {
     let mut o = output.lock().await;
@@ -1646,7 +1688,7 @@ async fn output_start_internal(
 
     let output_for_writer = output.clone();
     let writer_task = tokio::spawn(async move {
-        if let Err(e) = writer_playout(stdin, playout, topup, pcm_tx).await {
+        if let Err(e) = writer_playout(stdin, playout, topup, topup_stats, pcm_tx).await {
             let mut o = output_for_writer.lock().await;
             o.status.state = "error".into();
             o.status.last_error = Some(format!("audio writer: {e}"));
@@ -2128,11 +2170,13 @@ fn advance_to_next(p: &mut PlayoutState, reason: Option<&str>) {
 #[derive(Serialize)]
 struct TopUpGetResponse {
     config: TopUpConfig,
+    stats: TopUpStats,
 }
 
 async fn api_topup_get(State(state): State<AppState>) -> Json<TopUpGetResponse> {
     let cfg = state.topup.lock().await.clone();
-    Json(TopUpGetResponse { config: cfg })
+    let stats = state.topup_stats.lock().await.clone();
+    Json(TopUpGetResponse { config: cfg, stats })
 }
 
 async fn api_topup_set_config(
@@ -2373,17 +2417,29 @@ fn scan_audio_files_recursive(dir: &str) -> anyhow::Result<Vec<String>> {
     Ok(out)
 }
 
-// Returns true if the queue was modified (items appended).
-async fn topup_if_needed(log: &mut Vec<LogItem>, cfg: &TopUpConfig) -> bool {
+#[derive(Debug, Clone, Default)]
+struct TopUpAttempt {
+    appended: u32,
+    files_found: u32,
+    error: Option<String>,
+}
+
+/// Try to top-up a queue using the provided config.
+///
+/// This function never panics; it reports scan/probe errors via `error` so the
+/// caller can decide whether to fallback to another directory.
+async fn topup_try(log: &mut Vec<LogItem>, cfg: &TopUpConfig) -> TopUpAttempt {
+    let mut out = TopUpAttempt::default();
+
     if !cfg.enabled {
-        return false;
+        return out;
     }
     if cfg.dir.trim().is_empty() {
-        return false;
+        out.error = Some("top-up dir is empty".into());
+        return out;
     }
-
     if log.len() as u16 >= cfg.min_queue {
-        return false;
+        return out;
     }
 
     let dir = cfg.dir.clone();
@@ -2392,18 +2448,19 @@ async fn topup_if_needed(log: &mut Vec<LogItem>, cfg: &TopUpConfig) -> bool {
     let files = match files_res {
         Ok(Ok(v)) => v,
         Ok(Err(e)) => {
-            tracing::warn!("top-up scan failed: {e}");
-            return false;
+            out.error = Some(format!("scan failed: {e}"));
+            return out;
         }
         Err(e) => {
-            tracing::warn!("top-up scan join failed: {e}");
-            return false;
+            out.error = Some(format!("scan join failed: {e}"));
+            return out;
         }
     };
 
+    out.files_found = files.len() as u32;
     if files.is_empty() {
-        tracing::warn!("top-up dir had no audio files: {}", cfg.dir);
-        return false;
+        // Not an error per se, but it means we cannot refill.
+        return out;
     }
 
     // Pick random unique files.
@@ -2417,34 +2474,36 @@ async fn topup_if_needed(log: &mut Vec<LogItem>, cfg: &TopUpConfig) -> bool {
 
     for i in &picked {
         let path = &files[*i];
-        
-	let dur_s = probe_duration_seconds(path).unwrap_or(0);
-	let dur = if dur_s > 0 { fmt_dur_mmss(dur_s) } else { "0:00".into() };
-	if dur_s == 0 {
-           tracing::warn!("ffprobe duration failed for: {}", path);
-	}
 
-	log.push(LogItem {
+        let dur_s = probe_duration_seconds(path).unwrap_or(0);
+        let dur = if dur_s > 0 { fmt_dur_mmss(dur_s) } else { "0:00".into() };
+        if dur_s == 0 {
+            // Keep going, but record that probe was unhappy.
+            out.error.get_or_insert_with(|| "ffprobe duration failed for one or more files".into());
+        }
+
+        log.push(LogItem {
             id: Uuid::new_v4(),
             tag: "MUS".into(),
             time: "".into(),
             title: title_from_path(path),
             artist: "TopUp".into(),
             state: "queued".into(),
-            dur: dur.clone(),
+            dur,
             cart: path.to_string(), // absolute path
         });
     }
 
     normalize_queue_states(log);
-    tracing::info!("top-up appended {} items from {}", picked.len(), cfg.dir);
-    true
+    out.appended = picked.len() as u32;
+    out
 }
 
 async fn writer_playout(
     mut stdin: tokio::process::ChildStdin,
     playout: Arc<tokio::sync::RwLock<PlayoutState>>,
     topup: Arc<tokio::sync::Mutex<TopUpConfig>>,
+    topup_stats: Arc<tokio::sync::Mutex<TopUpStats>>,
     pcm_tx: tokio::sync::broadcast::Sender<Vec<u8>>,
 ) -> anyhow::Result<()> {
     const SR: u32 = 48_000;
@@ -2513,14 +2572,76 @@ async fn writer_playout(
             }
 
             let cfg = cfg_guard.clone();
+            let mut used_dir = cfg.dir.clone();
             drop(cfg_guard);
+
+            // Attempt a normal scan.
             let mut snapshot_to_persist: Option<Vec<LogItem>> = None;
+            let mut attempt = TopUpAttempt::default();
             {
                 let mut p = playout.write().await;
-                if topup_if_needed(&mut p.log, &cfg).await {
+                attempt = topup_try(&mut p.log, &cfg).await;
+                if attempt.appended > 0 {
                     snapshot_to_persist = Some(p.log.clone());
                 }
             }
+
+            // If the configured directory exists but is empty (or scan/probe
+            // fails), automatically try the installer-managed shared data path.
+            //
+            // This is the common "it plays" expectation on fresh installs.
+            if cfg.enabled && attempt.appended == 0 {
+                let fallback = default_topup_config().dir;
+                let should_try_fallback = (attempt.files_found == 0) || attempt.error.is_some();
+                if should_try_fallback && cfg.dir != fallback && std::path::Path::new(&fallback).exists() {
+                    let mut cfg2 = cfg.clone();
+                    cfg2.dir = fallback.clone();
+
+                    let mut attempt2 = TopUpAttempt::default();
+                    {
+                        let mut p = playout.write().await;
+                        attempt2 = topup_try(&mut p.log, &cfg2).await;
+                        if attempt2.appended > 0 {
+                            snapshot_to_persist = Some(p.log.clone());
+                        }
+                    }
+
+                    if attempt2.appended > 0 {
+                        tracing::warn!(
+                            "top-up from configured dir produced no items; falling back to {}",
+                            fallback
+                        );
+
+                        // Adopt the fallback for subsequent runs and persist best-effort.
+                        let mut cfg_guard = topup.lock().await;
+                        cfg_guard.dir = fallback.clone();
+                        let cfg_to_save = cfg_guard.clone();
+                        drop(cfg_guard);
+                        let _ = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+                            let mut conn = Connection::open(db_path())?;
+                            db_save_topup_config(&mut conn, &cfg_to_save)?;
+                            Ok(())
+                        }).await;
+
+                        attempt = attempt2;
+                        used_dir = fallback;
+                    }
+                }
+            }
+
+            // Publish top-up telemetry.
+            {
+                let mut s = topup_stats.lock().await;
+                s.last_scan_ms = Some(std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64);
+                s.last_dir = Some(used_dir.clone());
+                s.last_files_found = Some(attempt.files_found);
+                s.last_appended = Some(attempt.appended);
+                s.last_error = attempt.error.clone();
+            }
+
             if let Some(log) = snapshot_to_persist {
                 persist_queue(log).await;
             }
@@ -2704,7 +2825,18 @@ loop {
 
                 // Top-up if configured and queue is getting low.
                 let cfg = topup.lock().await.clone();
-                let _ = topup_if_needed(&mut p.log, &cfg).await;
+                let attempt = topup_try(&mut p.log, &cfg).await;
+                {
+                    let mut s = topup_stats.lock().await;
+                    s.last_scan_ms = Some(std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as u64);
+                    s.last_dir = Some(cfg.dir.clone());
+                    s.last_files_found = Some(attempt.files_found);
+                    s.last_appended = Some(attempt.appended);
+                    s.last_error = attempt.error;
+                }
 
                 snapshot_to_persist = Some(p.log.clone());
             }
