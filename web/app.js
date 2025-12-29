@@ -10,7 +10,7 @@ const TARGET_LOG_LEN = 12;
 
 // NOTE: UI_VERSION is purely informational (tooltip on the header).
 // The authoritative running version is exposed by the backend at /api/v1/status.
-const UI_VERSION = "0.1.83";
+const UI_VERSION = "0.1.84";
 
 const state = {
   role: "operator",
@@ -455,7 +455,15 @@ function makeNextQueueItem(){
   const roll = Math.random();
   if(roll < 0.10) return { time:"--:--", tag:"ID", title:"Station ID", artist:"", dur:"0:10", state:"queued" };
   if(roll < 0.20) return { time:"--:--", tag:"AD", title:"Sponsor Spot", artist:"15s", dur:"0:15", state:"queued" };
-  const t = randFrom(state.library);
+  // Demo-only: we no longer preload a demo library. (A deliberate UX choice so
+  // operators don't confuse fake content with LIVE content.)
+  // However, parts of the UI still keep a small synthetic "log" to preserve
+  // layout while the first LIVE /api/v1/status call is in-flight.
+  //
+  // If state.library is empty, we *must not* crash. A single exception during
+  // init prevents polling from starting and incorrectly leaves the UI in DEMO.
+  const t = (state.library && state.library.length) ? randFrom(state.library) : null;
+  if(!t) return { time:"--:--", tag:"MUS", title:"Queued Track", artist:"", dur:"0:00", state:"queued" };
   return { time:"--:--", tag:"MUS", title:t.title, artist:t.artist, dur:t.dur, state:"queued" };
 }
 

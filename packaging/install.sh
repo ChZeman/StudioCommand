@@ -109,6 +109,9 @@ PRIVKEY="${CERT_DIR}/privkey.pem"
 if [[ -n "${EMAIL}" ]]; then
   echo "[*] Installing certbot and requesting Let's Encrypt cert for ${DOMAIN}"
   apt-get install -y certbot python3-certbot-nginx
+  # Enable a minimal config so certbot's nginx plugin can perform its
+  # challenge/redirect edits. This is a transitional step; after cert
+  # issuance we install our own authoritative config in conf.d/.
   ln -sf "${SITE_AVAIL}" "${SITE_ENABLED}"
   rm -f /etc/nginx/sites-enabled/default || true
   nginx -t
@@ -125,12 +128,85 @@ if [[ -z "${EMAIL}" ]]; then
     -keyout "${PRIVKEY}" -out "${FULLCHAIN}" -subj "/CN=${DOMAIN}" >/dev/null 2>&1
 fi
 
-ln -sf "${SITE_AVAIL}" "${SITE_ENABLED}"
-rm -f /etc/nginx/sites-enabled/default || true
+  # ---------------------------------------------------------------------------
+  # Nginx configuration strategy (IMPORTANT)
+  # ---------------------------------------------------------------------------
+  # Historically we used /etc/nginx/sites-enabled/ for StudioCommand.
+  # On some hosts, distro defaults or prior manual edits can leave multiple
+  # "server_name studio.lakesradio.org" blocks on the same listen ports.
+  # Nginx will then warn "conflicting server name ... ignored" and may serve the
+  # wrong site (often the default "Welcome to nginx!" page).
+  #
+  # To make upgrades deterministic, we install ONE authoritative file in
+  # /etc/nginx/conf.d/ and mark it as default_server on both 80 and 9443.
+  # This avoids sites-enabled drift entirely.
 
-nginx -t
-systemctl enable --now nginx
-systemctl reload nginx
+  CONF_D="/etc/nginx/conf.d/00-studiocommand.conf"
+
+  echo "[*] Writing authoritative nginx config: ${CONF_D}"
+  cat >"${CONF_D}" <<EOF
+map \$http_upgrade \$connection_upgrade {
+  default upgrade;
+  ''      close;
+}
+
+server {
+  listen 80 default_server;
+  server_name ${DOMAIN};
+
+  location ^~ /.well-known/acme-challenge/ {
+    root /var/www/letsencrypt;
+  }
+
+  location / {
+    return 301 https://\$host:9443\$request_uri;
+  }
+}
+
+server {
+  listen 9443 ssl http2 default_server;
+  server_name ${DOMAIN};
+
+  ssl_certificate     ${FULLCHAIN};
+  ssl_certificate_key ${PRIVKEY};
+
+  # UI (static)
+  root ${ROOT}/current/web;
+  index index.html;
+
+  # UI routing (single-page app)
+  location / {
+    try_files \$uri \$uri/ /index.html;
+  }
+
+  # API proxy
+  location /api/ {
+    proxy_pass http://127.0.0.1:3000;
+    proxy_http_version 1.1;
+    proxy_set_header Host \$host;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \$scheme;
+  }
+
+  # WebSocket / WebRTC signaling
+  location /ws {
+    proxy_pass http://127.0.0.1:3000;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade \$http_upgrade;
+    proxy_set_header Connection \$connection_upgrade;
+    proxy_set_header Host \$host;
+  }
+}
+EOF
+
+  # Remove common sources of "Welcome to nginx!" on upgrades.
+  rm -f /etc/nginx/sites-enabled/default || true
+  rm -f /etc/nginx/sites-enabled/studiocommand.conf || true
+  rm -f /etc/nginx/sites-enabled/studiocommand || true
+
+  nginx -t
+  systemctl enable --now nginx
+  systemctl reload nginx
 
 # Ensure the newly installed engine is running.
 # (If the service was already running, enable --now does not restart it.)
