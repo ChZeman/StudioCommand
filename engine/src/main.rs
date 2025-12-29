@@ -2386,34 +2386,50 @@ fn title_from_path(p: &str) -> String {
 
 fn scan_audio_files_recursive(dir: &str) -> anyhow::Result<Vec<String>> {
     use std::path::Path;
-    let mut out = Vec::new();
-    let allowed = ["flac", "wav", "mp3", "m4a", "aac", "ogg", "opus"]; // decoder-supported
 
-    fn walk(path: &Path, allowed: &[&str], out: &mut Vec<String>) {
-        if let Ok(rd) = std::fs::read_dir(path) {
-            for ent in rd.flatten() {
-                let p = ent.path();
-                if p.is_dir() {
-                    walk(&p, allowed, out);
-                } else if p.is_file() {
-                    if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
-                        let ext_lc = ext.to_ascii_lowercase();
-                        if allowed.iter().any(|a| *a == ext_lc) {
-                            if let Some(s) = p.to_str() {
-                                out.push(s.to_string());
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
+    // Decoder-supported file extensions.
+    // Keep this list conservative — ffmpeg can decode more, but this is enough
+    // for common station libraries.
+    let allowed = ["flac", "wav", "mp3", "m4a", "aac", "ogg", "opus"];
 
     let root = Path::new(dir);
     if !root.exists() {
         anyhow::bail!("top-up dir does not exist: {dir}");
     }
-    walk(root, &allowed, &mut out);
+
+    // IMPORTANT: do not silently ignore filesystem errors.
+    // Earlier versions treated a failing `read_dir()` as "empty", which made
+    // debugging impossible (e.g., permission denied / stale NAS mount).
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(path) = stack.pop() {
+        let rd = std::fs::read_dir(&path)
+            .map_err(|e| anyhow::anyhow!("failed to read_dir({}): {e}", path.display()))?;
+        for ent in rd {
+            let ent = ent.map_err(|e| anyhow::anyhow!("failed to read_dir entry: {e}"))?;
+            let p = ent.path();
+            if p.is_dir() {
+                stack.push(p);
+                continue;
+            }
+            if !p.is_file() {
+                continue;
+            }
+
+            let Some(ext) = p.extension().and_then(|e| e.to_str()) else {
+                continue;
+            };
+            let ext_lc = ext.to_ascii_lowercase();
+            if !allowed.iter().any(|a| *a == ext_lc.as_str()) {
+                continue;
+            }
+
+            // Paths on Linux are bytes; they are *usually* UTF-8, but not always.
+            // `to_string_lossy()` lets us include non-UTF8 paths without crashing.
+            out.push(p.to_string_lossy().to_string());
+        }
+    }
+
     Ok(out)
 }
 
@@ -2459,7 +2475,10 @@ async fn topup_try(log: &mut Vec<LogItem>, cfg: &TopUpConfig) -> TopUpAttempt {
 
     out.files_found = files.len() as u32;
     if files.is_empty() {
-        // Not an error per se, but it means we cannot refill.
+        // Treat this as an operational error so the caller can fall back to a
+        // known-good directory (e.g., /opt/studiocommand/shared/data) and so
+        // operators can see what happened via /api/v1/playout/topup.
+        out.error = Some("no eligible audio files found".into());
         return out;
     }
 
