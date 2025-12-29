@@ -305,7 +305,14 @@ body{
    We remove excess padding to preserve vertical space. */
 .side-sub{margin:12px;}
 .panel-title-compact{padding:10px 10px 8px;}
-.producers-compact{max-height: 210px; overflow:auto;}
+.producers-compact{overflow:auto;}
+.panel.right{display:flex; flex-direction:column; min-height:0;}
+/* Remote Producers should expand to fill unused vertical space in the right rail.
+   The Control Panel is bottom-aligned (margin-top:auto) so it behaves like a dock.
+   We also set min-height:0 on flex children so overflow scrolling works correctly
+   in modern browsers. */
+.panel.right .remote-producers{display:flex; flex-direction:column; flex:1; min-height:0;}
+.panel.right .remote-producers .producers{flex:1; min-height:0; overflow:auto;}
 .side-controls{padding:12px; display:flex; flex-direction:column; gap:8px;}
 .muted-note{font-size:12px; color:var(--muted2);}
 

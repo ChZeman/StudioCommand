@@ -313,43 +313,22 @@ async fn load_queue_from_db_or_demo() -> Vec<LogItem> {
     })
     .await;
 
-    // Helper: in the stub/demo engine we always want a few items in the log so
-    // the UI has something to work with immediately after startup.
-    //
-    // In a real automation engine, the scheduler would be responsible for
-    // keeping the queue filled. Here we do a small amount of padding to make
-    // restarts less surprising (e.g. if the persisted DB contains only a few
-    // rows).
-    fn pad_demo_items(mut log: Vec<LogItem>) -> Vec<LogItem> {
-        // Keep the current items, but ensure at least 8 total so UI testing is
-        // consistent.
-        while log.len() < 8 {
-            let n = log.len();
-            log.push(LogItem {
-                id: Uuid::new_v4(),
-                tag: "MUS".into(),
-                time: format!("+{}", n),
-                title: format!("Queued Track {}", n),
-                artist: "Various".into(),
-                state: "queued".into(),
-                dur: "3:30".into(),
-                cart: format!("080-{:04}", 9000 + n as i32),
-            });
-        }
-        normalize_log_markers(&mut log);
-        log
-    }
-
     match res {
-        Ok(Ok(Some(log))) => pad_demo_items(log),
-        Ok(Ok(None)) => demo_log(),
+        Ok(Ok(Some(mut log))) => {
+            // In earlier versions we padded the queue with "Queued Track N" demo
+            // items to keep the UI busy. Operators asked that we stop doing
+            // this: an empty queue should remain empty.
+            normalize_log_markers(&mut log);
+            log
+        }
+        Ok(Ok(None)) => Vec::new(),
         Ok(Err(e)) => {
-            tracing::warn!("failed to load queue from sqlite, using demo queue: {e}");
-            demo_log()
+            tracing::warn!("failed to load queue from sqlite, starting with empty queue: {e}");
+            Vec::new()
         }
         Err(e) => {
-            tracing::warn!("failed to join sqlite load task, using demo queue: {e}");
-            demo_log()
+            tracing::warn!("failed to join sqlite load task, starting with empty queue: {e}");
+            Vec::new()
         }
     }
 }
@@ -815,19 +794,10 @@ async fn playout_tick(playout: Arc<tokio::sync::RwLock<PlayoutState>>) {
                 second.state = "next".into();
             }
 
-            // Keep a few queued items; in real engine this comes from scheduler.
-            while p.log.len() < 8 {
-                let n = p.log.len();
-                p.log.push(LogItem{ id: Uuid::new_v4(),
-                    tag:"MUS".into(),
-                    time:format!("+{}", n),
-                    title:format!("Queued Track {}", n),
-                    artist:"Various".into(),
-                    state:"queued".into(),
-                    dur:"3:30".into(),
-                    cart:format!("080-{:04}", 9000+n as i32),
-                });
-            }
+            // Earlier versions padded the queue with demo tracks ("Queued Track N").
+            // That behavior was convenient for UI screenshots, but surprising in
+            // production. We now leave the queue exactly as the operator/scheduler
+            // set it.
 
             // Persist the updated queue, but do it *after* releasing the write lock.
             // We intentionally clone the log to keep the lock hold-time short.

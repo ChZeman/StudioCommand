@@ -10,7 +10,7 @@ const TARGET_LOG_LEN = 12;
 
 // NOTE: UI_VERSION is purely informational (tooltip on the header).
 // The authoritative running version is exposed by the backend at /api/v1/status.
-const UI_VERSION = "0.1.67";
+const UI_VERSION = "0.1.68";
 
 const state = {
   role: "operator",
@@ -140,24 +140,15 @@ function toast(msg){
 }
 
 function initData(){
-  state.library = [
-    { title:"99 Luftballons", artist:"Nena", dur:"3:46", cat:"Gold", code:"MUS-00991" },
-    { title:"Amanda", artist:"Boston", dur:"4:06", cat:"A", code:"MUS-01352" },
-    { title:"Billie Jean", artist:"Michael Jackson", dur:"4:40", cat:"Gold", code:"MUS-00012" },
-    { title:"Don't Stop Believin'", artist:"Journey", dur:"4:11", cat:"A", code:"MUS-01001" },
-    { title:"Take On Me", artist:"a-ha", dur:"3:49", cat:"Recurrent", code:"MUS-00444" },
-    { title:"Sweet Child O' Mine", artist:"Guns N' Roses", dur:"5:55", cat:"B", code:"MUS-00777" },
-  ];
-
-  // Seed queue
-  state.log = [
-    { time:"15:33", tag:"MUS", title:"Lean On Me", artist:"Club Nouveau", dur:"3:48", state:"playing" },
-    { time:"15:37", tag:"MUS", title:"Bette Davis Eyes", artist:"Kim Carnes", dur:"3:30", state:"queued" },
-    { time:"15:41", tag:"MUS", title:"Talk Dirty To Me", artist:"Poison", dur:"3:42", state:"queued" },
-    { time:"15:45", tag:"EVT", title:"TOH Legal ID", artist:"", dur:"0:10", state:"locked" },
-    { time:"15:46", tag:"MUS", title:"Jessie's Girl", artist:"Rick Springfield", dur:"3:07", state:"queued" },
-    { time:"15:49", tag:"AD",  title:"Sponsor Break", artist:"2 spots", dur:"1:00", state:"queued" },
-  ];
+  // IMPORTANT:
+  // Earlier versions seeded the UI with demo library/queue content so the page
+  // looked "alive" even without a running engine. Real operators found this
+  // confusing because it resembled real content.
+  //
+  // We now start empty. If the engine is unreachable, the UI will show empty
+  // lists rather than synthetic "Queued Track N" placeholders.
+  state.library = [];
+  state.log = [];
 
   state.carts = {
     jingles: [
@@ -188,8 +179,20 @@ function initData(){
     ]
   };
 
-  syncNowPlayingFromQueue(true);
-  refillLog();
+  // No synthetic queue items.
+  // (If the engine is down, the operator should see "empty" not "fake".)
+  state.now.title = "—";
+  state.now.artist = "";
+  state.now.pos = 0;
+  state.now.dur = 0;
+
+  // Render the empty baseline immediately; fetchStatus() will replace this
+  // with LIVE data once the engine responds.
+  renderLibrary();
+  renderLog();
+  renderCarts();
+  renderProducers();
+  renderNow();
 }
 
 
