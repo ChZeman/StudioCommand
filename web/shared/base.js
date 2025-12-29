@@ -1,4 +1,4 @@
-/* StudioCommand shared shell JS (v0.1.86)
+/* StudioCommand shared shell JS (v0.1.87)
    - Populates elements marked [data-sc-version] with the running backend version
      (from /api/v1/status), when available.
    - Safe to include on landing/admin pages. */

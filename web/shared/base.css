@@ -1,4 +1,4 @@
-/* StudioCommand shared shell styles (v0.1.86).
+/* StudioCommand shared shell styles (v0.1.87).
    Used by landing and admin pages. Keep minimal and non-invasive. */
 :root{
   --bg:#0b0f14;
@@ -10,13 +10,23 @@
   --maxw:980px;
 }
 html,body{height:100%;}
+/* Defensive: avoid box-model surprises causing layout overflow/overlap. */
+*,*::before,*::after{box-sizing:border-box;}
 body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;}
 .sc-shell{max-width:var(--maxw);margin:0 auto;padding:28px 22px;}
 .sc-topbar{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin-bottom:18px;}
 .sc-brand{font-weight:800;letter-spacing:.2px;font-size:18px;}
 .sc-sub{color:var(--muted);font-size:12px;}
 .sc-card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:18px;}
-.sc-grid2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;}
+/*
+  Two-up button grid on the landing page.
+
+  The extra min-width/position rules below are *defensive*: they prevent weird
+  overlaps if any other global CSS (browser extensions, injected styles, etc.)
+  applies positioning or min-content sizing rules to anchors.
+*/
+.sc-grid2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;align-items:stretch;}
+.sc-grid2 > *{min-width:0;position:static;}
 @media (max-width:760px){.sc-grid2{grid-template-columns:1fr;}}
 .sc-btn{display:block;width:100%;padding:16px 14px;border-radius:12px;border:1px solid var(--border);background:rgba(255,255,255,.03);color:var(--text);text-decoration:none;font-weight:700;}
 .sc-btn:hover{background:rgba(255,255,255,.06);}
