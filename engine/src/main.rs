@@ -341,6 +341,18 @@ async fn load_queue_from_db_or_demo() -> Vec<LogItem> {
             // In earlier versions we padded the queue with "Queued Track N" demo
             // items to keep the UI busy. Operators asked that we stop doing
             // this: an empty queue should remain empty.
+            //
+            // One more safety net: some installs may still have those old demo
+            // rows persisted in SQLite. If they remain, they can block Top-Up
+            // from refilling the real queue (because they count toward
+            // `min_queue`). We strip them on load so the station always prefers
+            // real audio.
+            log.retain(|it| {
+                let is_demo_title = it.title.starts_with("Queued Track");
+                let is_demo_artist = it.artist == "Various";
+                let has_no_path = it.cart.trim().is_empty();
+                !(is_demo_title && is_demo_artist) && !has_no_path
+            });
             normalize_log_markers(&mut log);
             log
         }
@@ -2454,13 +2466,29 @@ async fn topup_try(log: &mut Vec<LogItem>, cfg: &TopUpConfig) -> TopUpAttempt {
         out.error = Some("top-up dir is empty".into());
         return out;
     }
-    // Only count *active* queue items toward `min_queue`.
-// Operators may choose to keep played items visible in the UI/history; those
-// should not prevent Top-Up from refilling an empty queue.
-let active_len = log.iter().filter(|it| it.state != "played").count() as u16;
-if active_len >= cfg.min_queue {
-    return out;
-}
+    // Only count *actually playable* items toward `min_queue`.
+    //
+    // Why this matters:
+    // - Some UI modes keep played items visible, or older installs may still
+    //   have placeholder/demo rows in SQLite.
+    // - Those rows can make the queue look "full" even when there is nothing
+    //   we can actually play, which would prevent Top-Up from refilling.
+    //
+    // We treat an item as "active" only if:
+    // - it is not explicitly marked played, AND
+    // - it has a non-empty `cart` path, AND
+    // - that path exists on disk.
+    let active_len = log
+        .iter()
+        .filter(|it| {
+            it.state != "played"
+                && !it.cart.trim().is_empty()
+                && std::path::Path::new(it.cart.as_str()).exists()
+        })
+        .count() as u16;
+    if active_len >= cfg.min_queue {
+        return out;
+    }
 
     let dir = cfg.dir.clone();
     let batch = cfg.batch as usize;
