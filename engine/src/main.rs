@@ -352,7 +352,12 @@ fn default_output_config() -> StreamOutputConfig {
 }
 
 fn default_topup_config() -> TopUpConfig {
-    TopUpConfig { enabled: false, dir: "".into(), min_queue: 5, batch: 5 }
+    // Default behavior: keep the station playing without requiring manual
+    // DB configuration on first install. The installer creates
+    // /opt/studiocommand/shared/data for persistent audio content.
+    // If you prefer a fully manual queue, set top_up_config.enabled = false
+    // via the API (or by inserting the row in SQLite).
+    TopUpConfig { enabled: true, dir: "/opt/studiocommand/shared/data".into(), min_queue: 5, batch: 5 }
 }
 
 fn db_load_topup_config(conn: &Connection) -> anyhow::Result<TopUpConfig> {
