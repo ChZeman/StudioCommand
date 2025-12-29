@@ -435,20 +435,26 @@ async fn load_topup_config_from_db_or_default() -> TopUpConfig {
             if topup_config_needs_migration(&cfg) {
                 let migrated = default_topup_config();
 
+                // Log before we move/clone any values so we never accidentally
+                // keep a legacy install silent.
+                tracing::warn!(
+                    "top-up config looked uninitialized; migrated to defaults (dir={})",
+                    migrated.dir
+                );
+
+                // We'll persist in the background, but we must not move `migrated`
+                // into the closure because we still return it below.
+                let migrated_for_save = migrated.clone();
+
                 // Best-effort persist; if this fails we still return the migrated
                 // config for this run so the station plays.
                 let path = db_path();
                 let _ = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
                     let mut conn = Connection::open(path)?;
-                    db_save_topup_config(&mut conn, &migrated)?;
+                    db_save_topup_config(&mut conn, &migrated_for_save)?;
                     Ok(())
                 })
                 .await;
-
-                tracing::warn!(
-                    "top-up config looked uninitialized; migrated to defaults (dir={})",
-                    migrated.dir
-                );
                 migrated
             } else {
                 cfg
