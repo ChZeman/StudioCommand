@@ -10,7 +10,7 @@ const TARGET_LOG_LEN = 12;
 
 // NOTE: UI_VERSION is purely informational (tooltip on the header).
 // The authoritative running version is exposed by the backend at /api/v1/status.
-const UI_VERSION = "0.1.82";
+const UI_VERSION = "0.1.83";
 
 const state = {
   role: "operator",
@@ -1260,6 +1260,24 @@ function tickNowPlaying(){
   const dur = state.now.dur || 0;
   const frac = (dur > 0) ? (posF / dur) : 0;
   qs("#npBar").style.width = Math.min(100, Math.max(0, frac*100)).toFixed(1) + "%";
+}
+
+// renderNow() is called by initData() as part of the initial UI baseline render.
+//
+// During the v0.1.82 UI refactor we consolidated rendering into per-section
+// ticks (e.g. tickNowPlaying()) and accidentally left initData() calling a
+// function that no longer existed. That caused a hard runtime exception on
+// page load:
+//
+//   Uncaught ReferenceError: renderNow is not defined
+//
+// A single JS exception prevents the status poll loop from starting, which in
+// turn keeps the UI stuck in DEMO even though /api/v1/status is healthy.
+//
+// We keep this tiny wrapper for clarity and backwards compatibility.
+function renderNow(){
+  tickNowPlaying();
+  renderApiBadge();
 }
 
 function skipNext(){
