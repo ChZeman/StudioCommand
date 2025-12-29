@@ -1768,6 +1768,7 @@ async fn writer_sine_wave(mut stdin: tokio::process::ChildStdin) -> anyhow::Resu
     let mut interval = tokio::time::interval(std::time::Duration::from_millis(20));
     loop {
         interval.tick().await;
+        let mut request_topup = false;
         let mut buf = Vec::with_capacity(FRAMES * 2 * 2);
         for _ in 0..FRAMES {
             let v = (phase.sin() * 0.12 * i16::MAX as f32) as i16;
@@ -2456,6 +2457,12 @@ async fn writer_playout(
 
     let silence = make_silence_chunk(FRAMES);
     let mut interval = tokio::time::interval(std::time::Duration::from_millis(20));
+    // Even when the queue is empty we must keep Top-Up running, otherwise
+    // the system can get stuck on silence forever (especially after upgrades
+    // that remove demo tracks).
+    //
+    // We throttle scans to a low cadence to avoid hammering the filesystem.
+    let mut last_topup_tick = std::time::Instant::now() - std::time::Duration::from_secs(10);
     // Avoid hammering the filesystem when we're idling on silence.
     let mut last_topup_check = std::time::Instant::now() - std::time::Duration::from_secs(10);
 
@@ -2532,6 +2539,13 @@ async fn writer_playout(
 
             if p.log.is_empty() {
                 // Nothing to play.
+                // While we are silent, periodically attempt Top-Up so the
+                // queue can recover automatically.
+                if last_topup_tick.elapsed() >= std::time::Duration::from_secs(2) {
+                    request_topup = true;
+                    last_topup_tick = std::time::Instant::now();
+                }
+
                 p.now.title.clear();
                 p.now.artist.clear();
                 p.now.dur = 0;
@@ -2555,9 +2569,28 @@ async fn writer_playout(
                         parse_dur_seconds(&first.dur).unwrap_or(0),
                         first.cart.clone(),
                     )
+
                 };
 
+        // If we were silent (empty queue), run Top-Up outside the playout lock.
+        // We do this *before* attempting to spawn a decoder, so the next loop
+        // iteration can pick up the newly queued item.
+        if request_topup {
+            let cfg = topup.lock().await.clone();
+            let mut snapshot_to_persist: Option<Vec<LogItem>> = None;
+            {
+                let mut p = playout.write().await;
+                if topup_if_needed(&mut p.log, &cfg).await {
+                    snapshot_to_persist = Some(p.log.clone());
+                }
+            }
+            if let Some(log) = snapshot_to_persist {
+                persist_queue(log).await;
+            }
+        }
+
                 let path_opt = resolve_cart_to_path(&cart)
+
                     .or_else(|| if cart.starts_with('/') { Some(cart.clone()) } else { None });
 
                 // Update now-playing (anchor timing + reset meters/progress).
