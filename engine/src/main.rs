@@ -144,6 +144,16 @@ struct TopUpStats {
     last_appended: Option<u32>,
     /// Human-friendly last error string.
     last_error: Option<String>,
+
+    /// If the last periodic tick *did not* scan because the queue was already
+    /// at/above `min_queue`, we record a short reason here.
+    ///
+    /// Why this exists:
+    /// We continuously publish top-up telemetry so operators can see whether
+    /// the automation is healthy. If we overwrite `last_files_found` with 0
+    /// every time we *skip* scanning (because the queue is already full), it
+    /// looks like top-up is broken even when it previously appended items.
+    last_skip_reason: Option<String>,
 }
 
 
@@ -2447,9 +2457,18 @@ fn scan_audio_files_recursive(dir: &str) -> anyhow::Result<Vec<String>> {
 
 #[derive(Debug, Clone, Default)]
 struct TopUpAttempt {
+    /// True if we actually walked the filesystem to discover files.
+    ///
+    /// A periodic tick can also short-circuit early if the queue is already
+    /// at/above `min_queue`. In that case we do *not* want to overwrite the
+    /// last meaningful scan stats with zeros.
+    scanned: bool,
     appended: u32,
     files_found: u32,
     error: Option<String>,
+
+    /// If we didn't scan, record why.
+    skip_reason: Option<String>,
 }
 
 /// Try to top-up a queue using the provided config.
@@ -2487,8 +2506,15 @@ async fn topup_try(log: &mut Vec<LogItem>, cfg: &TopUpConfig) -> TopUpAttempt {
         })
         .count() as u16;
     if active_len >= cfg.min_queue {
+        out.skip_reason = Some(format!(
+            "skipped: active queue {} >= min_queue {}",
+            active_len, cfg.min_queue
+        ));
         return out;
     }
+
+    // From here onward we intend to actually scan.
+    out.scanned = true;
 
     let dir = cfg.dir.clone();
     let batch = cfg.batch as usize;
@@ -2683,14 +2709,24 @@ async fn writer_playout(
             // Publish top-up telemetry.
             {
                 let mut s = topup_stats.lock().await;
-                s.last_scan_ms = Some(std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as u64);
-                s.last_dir = Some(used_dir.clone());
-                s.last_files_found = Some(attempt.files_found);
-                s.last_appended = Some(attempt.appended);
-                s.last_error = attempt.error.clone();
+                // Only overwrite scan results if we actually scanned.
+                // Otherwise a healthy system (queue full) would constantly
+                // clobber the last meaningful stats with zeros.
+                if attempt.scanned {
+                    s.last_scan_ms = Some(
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as u64,
+                    );
+                    s.last_dir = Some(used_dir.clone());
+                    s.last_files_found = Some(attempt.files_found);
+                    s.last_appended = Some(attempt.appended);
+                    s.last_error = attempt.error.clone();
+                    s.last_skip_reason = None;
+                } else {
+                    s.last_skip_reason = attempt.skip_reason.clone();
+                }
             }
 
             if let Some(log) = snapshot_to_persist {
