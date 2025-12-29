@@ -2466,7 +2466,54 @@ async fn writer_playout(
         if last_topup_check.elapsed() >= std::time::Duration::from_secs(2) {
             last_topup_check = std::time::Instant::now();
 
-            let cfg = topup.lock().await.clone();
+            // Top-up config is persisted in SQLite and may point at external
+            // storage (e.g., a NAS mount). If that mount disappears, the engine
+            // would otherwise sit on silence forever.
+            //
+            // We treat a missing configured directory as a *runtime health* issue
+            // and automatically fall back to the built-in shared data path
+            // created by the installer.
+            //
+            // This keeps "it plays" behavior reliable while still allowing
+            // operators to intentionally point top-up elsewhere.
+            let mut cfg_guard = topup.lock().await;
+            let cfg_default = default_topup_config();
+            if cfg_guard.enabled {
+                let configured = cfg_guard.dir.clone();
+                let configured_exists = std::path::Path::new(&configured).exists();
+                if !configured_exists {
+                    let fallback = cfg_default.dir.clone();
+                    if configured != fallback && std::path::Path::new(&fallback).exists() {
+                        tracing::warn!(
+                            "top-up dir missing ({}); falling back to {}",
+                            configured,
+                            fallback
+                        );
+
+                        // Adopt the fallback for this run (and persist best-effort).
+                        cfg_guard.dir = fallback;
+
+                        // If a legacy row had min/batch=0, fix that too.
+                        if cfg_guard.min_queue == 0 {
+                            cfg_guard.min_queue = cfg_default.min_queue;
+                        }
+                        if cfg_guard.batch == 0 {
+                            cfg_guard.batch = cfg_default.batch;
+                        }
+
+                        let cfg_to_save = cfg_guard.clone();
+                        let _ = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+                            let mut conn = Connection::open(db_path())?;
+                            db_save_topup_config(&mut conn, &cfg_to_save)?;
+                            Ok(())
+                        })
+                        .await;
+                    }
+                }
+            }
+
+            let cfg = cfg_guard.clone();
+            drop(cfg_guard);
             let mut snapshot_to_persist: Option<Vec<LogItem>> = None;
             {
                 let mut p = playout.write().await;
