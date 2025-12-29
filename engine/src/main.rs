@@ -360,6 +360,20 @@ fn default_topup_config() -> TopUpConfig {
     TopUpConfig { enabled: true, dir: "/opt/studiocommand/shared/data".into(), min_queue: 5, batch: 5 }
 }
 
+/// Returns true if the stored top-up config looks like an *uninitialized* legacy row.
+///
+/// Why this exists:
+/// - Older StudioCommand versions created a `top_up_config` row with placeholder values
+///   (e.g., `enabled = 0`, empty dir, or zeros for min_queue/batch).
+/// - Newer versions default to a sensible, "keep the station playing" setup by
+///   topping up from `/opt/studiocommand/shared/data`.
+///
+/// If we always trust the presence of the row, a legacy placeholder would "win" and
+/// the engine would idle on silence forever even though audio exists.
+fn topup_config_needs_migration(cfg: &TopUpConfig) -> bool {
+    cfg.dir.trim().is_empty() || cfg.min_queue == 0 || cfg.batch == 0
+}
+
 fn db_load_topup_config(conn: &Connection) -> anyhow::Result<TopUpConfig> {
     db_init(conn)?;
 
@@ -412,7 +426,34 @@ async fn load_topup_config_from_db_or_default() -> TopUpConfig {
     .await;
 
     match res {
-        Ok(Ok(cfg)) => cfg,
+        Ok(Ok(cfg)) => {
+            // If a legacy install already has a `top_up_config` row, it may contain
+            // placeholder values that effectively disable top-up forever.
+            //
+            // We treat that specific shape as "uninitialized" and migrate it to
+            // the new, safe defaults (shared data folder).
+            if topup_config_needs_migration(&cfg) {
+                let migrated = default_topup_config();
+
+                // Best-effort persist; if this fails we still return the migrated
+                // config for this run so the station plays.
+                let path = db_path();
+                let _ = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+                    let mut conn = Connection::open(path)?;
+                    db_save_topup_config(&mut conn, &migrated)?;
+                    Ok(())
+                })
+                .await;
+
+                tracing::warn!(
+                    "top-up config looked uninitialized; migrated to defaults (dir={})",
+                    migrated.dir
+                );
+                migrated
+            } else {
+                cfg
+            }
+        }
         Ok(Err(e)) => {
             tracing::warn!("failed to load top-up config, using defaults: {e}");
             default_topup_config()
