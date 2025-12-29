@@ -31,8 +31,24 @@
       </div>
     </header>
 
+<!--
+  Admin tabs (v0.1.89)
+  - Horizontal tabs (operator-friendly)
+  - Default tab: System
+  - Supports deep links via hash: /admin#streaming, /admin#library, /admin#automation
+  - Persists last tab in localStorage (sc_admin_tab)
+-->
+<nav class="admin-tabs" aria-label="Administration sections">
+  <button class="admin-tab" id="tabbtn-system" type="button" data-tab="system" aria-controls="tab-system">System</button>
+  <button class="admin-tab" id="tabbtn-streaming" type="button" data-tab="streaming" aria-controls="tab-streaming">Streaming</button>
+  <button class="admin-tab" id="tabbtn-automation" type="button" data-tab="automation" aria-controls="tab-automation">Automation</button>
+  <button class="admin-tab" id="tabbtn-library" type="button" data-tab="library" aria-controls="tab-library">Library</button>
+  <button class="admin-tab" id="tabbtn-access" type="button" data-tab="access" aria-controls="tab-access" disabled title="Coming soon">Access</button>
+</nav>
+
+
     <main class="layout" id="layout" style="grid-template-columns: 1fr;">
-      <section class="panel" style="min-width:0;">
+      <section class="panel" style="min-width:0;" id="tab-system" role="tabpanel" data-tabpanel="system" aria-labelledby="tabbtn-system">
         <div class="panel-title">
           <div>System Status</div>
           <div class="panel-meta">Engine • Audio • Streaming • Remote health</div>
@@ -66,7 +82,7 @@
         </div>
       </section>
 
-      <section class="panel" style="min-width:0;">
+      <section class="panel" style="min-width:0;" id="tab-streaming" role="tabpanel" data-tabpanel="streaming" aria-labelledby="tabbtn-streaming" hidden>
         <div class="panel-title">
           <div>Streaming Output (Icecast)</div>
           <div class="panel-meta">Moved from producer UI</div>
@@ -97,7 +113,7 @@
         </div>
       </section>
 
-      <section class="panel" style="min-width:0;">
+      <section class="panel" style="min-width:0;" id="tab-automation" role="tabpanel" data-tabpanel="automation" aria-labelledby="tabbtn-automation" hidden>
         <div class="panel-title">
           <div>Top-up Configuration</div>
           <div class="panel-meta">Admin-only</div>
@@ -110,7 +126,7 @@
         </div>
       </section>
 
-      <section class="panel" style="min-width:0;">
+      <section class="panel" style="min-width:0;" id="tab-library" role="tabpanel" data-tabpanel="library" aria-labelledby="tabbtn-library" hidden>
         <div class="panel-title">
           <div>Library Maintenance</div>
           <div class="panel-meta">Scan • repair • housekeeping</div>
@@ -127,6 +143,67 @@
     <div class="scrim" id="scrim" hidden></div>
   </div>
 
-  <script src="./app.js?v=0.1.87"></script>
+  
+<script>
+  /*
+    Admin tab controller (small + dependency-free)
+    - Clicking a tab hides other panels by toggling the [hidden] attribute
+    - Active tab is stored in localStorage for operator convenience
+    - URL hash enables deep links: /admin#streaming, etc.
+  */
+  (function () {
+    const STORAGE_KEY = "sc_admin_tab";
+    const tabs = Array.from(document.querySelectorAll(".admin-tab[data-tab]"));
+    const panels = new Map(Array.from(document.querySelectorAll('[data-tabpanel]'))
+      .map(p => [p.getAttribute("data-tabpanel"), p]));
+
+    function setActive(name, {updateHash = true} = {}) {
+      if (!panels.has(name)) name = "system";
+
+      // Buttons
+      for (const b of tabs) {
+        const is = b.getAttribute("data-tab") === name;
+        b.classList.toggle("is-active", is);
+        b.setAttribute("aria-selected", String(is));
+        b.setAttribute("tabindex", is ? "0" : "-1");
+      }
+
+      // Panels
+      for (const [k, p] of panels.entries()) {
+        if (k === name) p.removeAttribute("hidden");
+        else p.setAttribute("hidden", "");
+      }
+
+      try { localStorage.setItem(STORAGE_KEY, name); } catch (_) {}
+      if (updateHash) {
+        // Keep URL stable and human readable; empty hash means "system"
+        const h = (name === "system") ? "" : ("#" + name);
+        if (location.hash !== h) history.replaceState(null, "", location.pathname + location.search + h);
+      }
+    }
+
+    function pickInitial() {
+      const fromHash = (location.hash || "").replace(/^#/, "").trim();
+      if (fromHash && panels.has(fromHash)) return fromHash;
+      try {
+        const fromStore = localStorage.getItem(STORAGE_KEY);
+        if (fromStore && panels.has(fromStore)) return fromStore;
+      } catch (_) {}
+      return "system";
+    }
+
+    // Wire clicks
+    for (const b of tabs) {
+      b.addEventListener("click", () => setActive(b.getAttribute("data-tab")));
+    }
+
+    // Hash changes (manual edits / bookmarks)
+    window.addEventListener("hashchange", () => setActive(pickInitial(), {updateHash: true}));
+
+    // Initial activation
+    setActive(pickInitial(), {updateHash: true});
+  })();
+</script>
+<script src="./app.js?v=0.1.89"></script>
 </body>
 </html>

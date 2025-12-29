@@ -525,3 +525,47 @@ button.mini:disabled{ opacity: .35; cursor: default; }
 }
 /* Keep the Control Panel bottom-aligned in the right rail. */
 .panel.right .control-panel{margin-top:auto;}
+
+
+/* ============================================================
+   Admin tabs (v0.1.89)
+   Purpose: keep /admin a single page while letting us grow admin tooling.
+   Design goals:
+     - Simple horizontal tabs
+     - No framework dependency
+     - Does not interfere with existing producer UI styles
+   ============================================================ */
+.admin-tabs{
+  display:flex;
+  gap:8px;
+  padding: 0 18px 14px 18px;
+  border-bottom: 1px solid rgba(255,255,255,.08);
+  overflow-x:auto;
+  -webkit-overflow-scrolling: touch;
+}
+.admin-tab{
+  appearance:none;
+  border: 1px solid rgba(255,255,255,.10);
+  background: rgba(255,255,255,.03);
+  color: rgba(255,255,255,.86);
+  padding: 8px 12px;
+  border-radius: 10px;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: transform .06s ease, background .12s ease, border-color .12s ease;
+}
+.admin-tab:hover{
+  transform: translateY(-1px);
+  border-color: rgba(74,163,255,.35);
+  background: rgba(74,163,255,.06);
+}
+.admin-tab.is-active{
+  border-color: rgba(124,255,199,.35);
+  background: rgba(124,255,199,.08);
+}
+.admin-tab[disabled]{
+  opacity: .45;
+  cursor: not-allowed;
+  transform: none;
+}
