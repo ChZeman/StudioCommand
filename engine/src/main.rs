@@ -2454,9 +2454,13 @@ async fn topup_try(log: &mut Vec<LogItem>, cfg: &TopUpConfig) -> TopUpAttempt {
         out.error = Some("top-up dir is empty".into());
         return out;
     }
-    if log.len() as u16 >= cfg.min_queue {
-        return out;
-    }
+    // Only count *active* queue items toward `min_queue`.
+// Operators may choose to keep played items visible in the UI/history; those
+// should not prevent Top-Up from refilling an empty queue.
+let active_len = log.iter().filter(|it| it.state != "played").count() as u16;
+if active_len >= cfg.min_queue {
+    return out;
+}
 
     let dir = cfg.dir.clone();
     let batch = cfg.batch as usize;
