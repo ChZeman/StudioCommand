@@ -174,10 +174,25 @@ server {
   root ${ROOT}/current/web;
   index index.html;
 
-  # UI routing (single-page app)
-  location / {
-    try_files \$uri \$uri/ /index.html;
-  }
+  # UI entrypoints (multi-page)
+# We serve a landing page at '/', and two distinct app entrypoints:
+#   /remote -> /remote.html
+#   /admin  -> /admin.html
+#
+# These exact-match locations MUST appear before the catch-all SPA-style
+# fallback, otherwise Nginx will happily serve /index.html for /remote and
+# /admin, making every page look like the landing page.
+location = /remote  { try_files /remote.html =404; }
+location = /remote/ { try_files /remote.html =404; }
+location = /admin   { try_files /admin.html  =404; }
+location = /admin/  { try_files /admin.html  =404; }
+
+# UI routing (SPA-style fallback)
+# - Static assets are served normally
+# - Unknown paths fall back to the landing page (index.html)
+location / {
+  try_files \$uri \$uri/ /index.html;
+}
 
   # API proxy
   location /api/ {
