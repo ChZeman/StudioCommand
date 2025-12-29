@@ -10,7 +10,7 @@ const TARGET_LOG_LEN = 12;
 
 // NOTE: UI_VERSION is purely informational (tooltip on the header).
 // The authoritative running version is exposed by the backend at /api/v1/status.
-const UI_VERSION = "0.1.81";
+const UI_VERSION = "0.1.82";
 
 const state = {
   role: "operator",
@@ -332,11 +332,25 @@ if(state.flashArmed && Array.isArray(state.flashPrevOrder) && state.flashPrevOrd
       }));
     }
 
+    // Mark the UI as LIVE as soon as we have a successful /api/v1/status fetch.
+    //
+    // Historically we were overly strict here (requiring a bunch of optional
+    // fields to exist). That caused a nasty failure mode:
+    //   - the engine was reachable and returning JSON
+    //   - but the UI stayed in DEMO mode, disabling buttons
+    //
+    // The engine always returns a "version" string in /api/v1/status.
+    // Treat that as the authoritative signal that the UI is connected.
+    if(data && typeof data.version === "string" && data.version.length > 0){
+      state.apiMode = "LIVE";
+    }
+
     state.status = data; // keep raw around for debugging/inspection
     state.lastStatusAt = Date.now();
     state.lastStatusError = null;
 
-    setApiBadge("LIVE");
+    setApiBadge(state.apiMode === "LIVE" ? "LIVE" : "DEMO",
+      state.apiMode === "LIVE" ? "LIVE" : "DEMO (status missing version)");
 
     // Fetch streaming output status in LIVE mode.
     // We keep it separate from /api/v1/status so output can evolve independently.
