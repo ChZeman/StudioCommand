@@ -18,7 +18,7 @@ const TARGET_LOG_LEN = 12;
 
 // NOTE: UI_VERSION is purely informational (tooltip on the header).
 // The authoritative running version is exposed by the backend at /api/v1/status.
-const UI_VERSION = "0.1.96";
+const UI_VERSION = "0.1.97";
 
 const state = {
   role: "operator",
@@ -1472,6 +1472,8 @@ function tickListenLiveUi(){
 }
 
 function tickNowPlaying(){
+  // Guard: Admin pages do not render now-playing widgets. Avoid null deref.
+  if (!qs("#npTitle")) return;
   // When connected to the engine API, we do not advance the clock locally.
   // The engine is the source of truth, but we *interpolate* between 1s polls
   // using a local monotonic clock for a smooth UI.
