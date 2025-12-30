@@ -18,7 +18,7 @@ const TARGET_LOG_LEN = 12;
 
 // NOTE: UI_VERSION is purely informational (tooltip on the header).
 // The authoritative running version is exposed by the backend at /api/v1/status.
-const UI_VERSION = "0.1.97";
+const UI_VERSION = "0.1.98";
 
 const state = {
   role: "operator",
@@ -1472,8 +1472,14 @@ function tickListenLiveUi(){
 }
 
 function tickNowPlaying(){
-  // Guard: Admin pages do not render now-playing widgets. Avoid null deref.
-  if (!qs("#npTitle")) return;
+  // Guard: some pages (Admin) do not render now-playing widgets.
+  // If any required element is missing, bail out (never crash the app loop).
+  const _npTitle = qs("#npTitle");
+  const _npArtist = qs("#npArtist");
+  const _npRemaining = qs("#npRemaining");
+  const _npPos = qs("#npPos");
+  const _npDur = qs("#npDur");
+  if (!_npTitle || !_npArtist || !_npRemaining || !_npPos || !_npDur) return;
   // When connected to the engine API, we do not advance the clock locally.
   // The engine is the source of truth, but we *interpolate* between 1s polls
   // using a local monotonic clock for a smooth UI.
@@ -1492,12 +1498,12 @@ function tickNowPlaying(){
   const pos = Math.floor(posF);
   const rem = Math.max(0, (state.now.dur || 0) - posF);
 
-  qs("#npRemaining").textContent = fmtTime(Math.floor(rem));
+  _npRemaining.textContent = fmtTime(Math.floor(rem));
   const [posStr, durStr] = fmtPosDur(pos, state.now.dur);
-  qs("#npPos").textContent = posStr;
-  qs("#npDur").textContent = durStr;
-  qs("#npTitle").textContent = state.now.title;
-  qs("#npArtist").textContent = state.now.artist;
+  _npPos.textContent = posStr;
+  _npDur.textContent = durStr;
+  _npTitle.textContent = state.now.title;
+  _npArtist.textContent = state.now.artist;
 
   const dur = state.now.dur || 0;
   const frac = (dur > 0) ? (posF / dur) : 0;
