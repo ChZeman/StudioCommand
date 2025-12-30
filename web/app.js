@@ -18,7 +18,7 @@ const TARGET_LOG_LEN = 12;
 
 // NOTE: UI_VERSION is purely informational (tooltip on the header).
 // The authoritative running version is exposed by the backend at /api/v1/status.
-const UI_VERSION = "0.1.95";
+const UI_VERSION = "0.1.96";
 
 const state = {
   role: "operator",
@@ -824,6 +824,7 @@ function renderAll(){
 
 function renderLog(){
   const el = qs("#logList");
+  if (!el) return;
   if(!el) return;
   el.innerHTML = "";
 
@@ -1154,6 +1155,7 @@ function wireQueueInteractionHandlers(){
 
 function renderProducers(){
   const el = qs("#producerTiles");
+  if (!el) return;
   if(!el) return;
   el.innerHTML = "";
   state.producers.forEach(p => {
@@ -1215,6 +1217,7 @@ function renderProducers(){
 
 function renderCarts(){
   const el = qs("#cartGrid");
+  if (!el) return;
   el.innerHTML = "";
   const items = state.carts[state.cartTab] || [];
   items.forEach(it => {
@@ -1234,6 +1237,7 @@ function renderCarts(){
 
 function renderLibrary(){
   const el = qs("#libResults");
+  if (!el) return;
   el.innerHTML = "";
   state.library.forEach((it, idx) => {
     const r = document.createElement("div");
