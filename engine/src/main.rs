@@ -802,6 +802,9 @@ fn build_router(state: AppState) -> Router {
         .route("/api/v1/meters", get(meters))
         .route("/api/v1/ping", get(ping))
         .route("/api/v1/system/info", get(system_info))
+        // Admin: System dashboard (v1.0-lite)
+        // This is designed to be additive-only so the UI can evolve safely.
+        .route("/api/v1/admin/system", get(api_admin_system_v1_lite))
         .route("/api/v1/output", get(api_output_get))
         .route("/api/v1/output/config", post(api_output_set_config))
         .route("/api/v1/output/start", post(api_output_start))
@@ -1428,6 +1431,109 @@ struct SystemInfo {
     hostname: Option<String>,
 }
 
+// --- Admin: System dashboard schema (v1.0-lite) ---------------------------
+//
+// Contract goals:
+// - Safe for LIVE: collection must not hang the request (especially on dead
+//   network mounts).
+// - Additive-only: we can add new fields without breaking older UIs.
+// - UI-friendly: small number of stable, well-named fields.
+
+#[derive(Serialize)]
+struct AdminSystemV1Lite {
+    schema_version: String,
+    generated_at: String,
+    build: AdminBuildInfo,
+    server: AdminServerInfo,
+    engine: AdminEngineInfo,
+    host: AdminHostInfo,
+    storage: AdminStorageInfo,
+    events: AdminEvents,
+}
+
+#[derive(Serialize)]
+struct AdminBuildInfo {
+    version: String,
+    // Optional: if the build pipeline injects this later, the UI can display it.
+    // We keep the field for forward-compat, but return null/empty for now.
+    commit: Option<String>,
+}
+
+#[derive(Serialize)]
+struct AdminServerInfo {
+    hostname: Option<String>,
+    timezone: String,
+    uptime_s: u64,
+}
+
+#[derive(Serialize)]
+struct AdminEngineInfo {
+    // The operator's intent is "LIVE"; this engine build currently runs real
+    // playout, so we report LIVE. If a future demo mode returns, this can be
+    // computed instead of hard-coded.
+    mode: String,
+    status: String,
+}
+
+#[derive(Serialize)]
+struct AdminHostInfo {
+    cpu: AdminCpuInfo,
+    memory: AdminMemoryInfo,
+}
+
+#[derive(Serialize)]
+struct AdminCpuInfo {
+    load: AdminLoadAvg,
+}
+
+#[derive(Serialize)]
+struct AdminLoadAvg {
+    one: f32,
+    five: f32,
+    fifteen: f32,
+}
+
+#[derive(Serialize)]
+struct AdminMemoryInfo {
+    total_bytes: u64,
+    used_bytes: u64,
+    available_bytes: u64,
+}
+
+#[derive(Serialize)]
+struct AdminStorageInfo {
+    filesystems: Vec<AdminFilesystem>,
+}
+
+#[derive(Serialize)]
+struct AdminFilesystem {
+    mount: String,
+    source: String,
+    fstype: String,
+    flags: Vec<String>,
+    size_bytes: Option<u64>,
+    used_bytes: Option<u64>,
+    free_bytes: Option<u64>,
+    used_pct: Option<f32>,
+    status: String,
+    message: String,
+}
+
+#[derive(Serialize)]
+struct AdminEvents {
+    recent: Vec<AdminEvent>,
+}
+
+#[derive(Serialize)]
+struct AdminEvent {
+    // RFC3339 UTC when available; empty when the underlying source has no
+    // timestamp (e.g. stderr tail lines).
+    ts: String,
+    level: String,
+    component: String,
+    message: String,
+}
+
 
 
 
@@ -1506,6 +1612,271 @@ async fn system_info(State(st): State<AppState>) -> Json<SystemInfo> {
         temp_c,
         hostname,
     })
+}
+
+// Admin System (v1.0-lite)
+//
+// This endpoint intentionally avoids "deep" checks and never blocks on slow or
+// broken resources (especially network mounts). For anything that might block,
+// we run it in a blocking thread and time-box it.
+async fn api_admin_system_v1_lite(State(st): State<AppState>) -> Json<AdminSystemV1Lite> {
+    use time::format_description::well_known::Rfc3339;
+    use time::OffsetDateTime;
+    use tokio::time::{timeout, Duration};
+
+    let generated_at = OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .unwrap_or_else(|_| "".to_string());
+
+    // Host + load/memory via sysinfo. (sysinfo reports memory in KiB on some
+    // platforms; we standardize to bytes by multiplying by 1024.)
+    let mut sys = st.sys.lock().await;
+    sys.refresh_cpu();
+    sys.refresh_memory();
+    let la = sysinfo::System::load_average();
+    let uptime_s = sysinfo::System::uptime();
+    let total_bytes = sys.total_memory().saturating_mul(1024);
+    let available_bytes = sys.available_memory().saturating_mul(1024);
+    let used_bytes = total_bytes.saturating_sub(available_bytes);
+
+    drop(sys);
+
+    // Filesystems/mounts (safe, time-boxed).
+    let filesystems = match timeout(Duration::from_millis(650), collect_filesystems_v1_lite()).await {
+        Ok(v) => v,
+        Err(_) => vec![AdminFilesystem {
+            mount: "/".to_string(),
+            source: "unknown".to_string(),
+            fstype: "unknown".to_string(),
+            flags: vec![],
+            size_bytes: None,
+            used_bytes: None,
+            free_bytes: None,
+            used_pct: None,
+            status: "unknown".to_string(),
+            message: "filesystem scan timed out".to_string(),
+        }],
+    };
+
+    // Recent events: best-effort, non-blocking. For now, we surface the
+    // streaming output stderr tail (if configured) because it is frequently the
+    // most actionable information for ops.
+    let recent = {
+        let out = st.output.lock().await;
+        out.stderr_tail
+            .iter()
+            .rev()
+            .take(20)
+            .rev()
+            .map(|line| AdminEvent {
+                ts: "".to_string(),
+                level: "info".to_string(),
+                component: "output".to_string(),
+                message: line.clone(),
+            })
+            .collect::<Vec<_>>()
+    };
+
+    Json(AdminSystemV1Lite {
+        schema_version: "1.0-lite".to_string(),
+        generated_at,
+        build: AdminBuildInfo {
+            version: st.version.clone(),
+            commit: None,
+        },
+        server: AdminServerInfo {
+            hostname: sysinfo::System::host_name(),
+            timezone: "America/Chicago".to_string(),
+            uptime_s,
+        },
+        engine: AdminEngineInfo {
+            mode: "LIVE".to_string(),
+            status: "ok".to_string(),
+        },
+        host: AdminHostInfo {
+            cpu: AdminCpuInfo {
+                load: AdminLoadAvg {
+                    one: la.one as f32,
+                    five: la.five as f32,
+                    fifteen: la.fifteen as f32,
+                },
+            },
+            memory: AdminMemoryInfo {
+                total_bytes,
+                used_bytes,
+                available_bytes,
+            },
+        },
+        storage: AdminStorageInfo { filesystems },
+        events: AdminEvents { recent },
+    })
+}
+
+/// Collect mounted filesystems safely.
+///
+/// We parse /proc/self/mountinfo (fast, local) to discover mount points, then
+/// compute space for each mount via statvfs(). Each statvfs call is time-boxed
+/// so a dead network mount can never hang the request.
+async fn collect_filesystems_v1_lite() -> Vec<AdminFilesystem> {
+    use tokio::time::{timeout, Duration};
+
+    let mounts = read_mountinfo();
+    let mut out = Vec::new();
+
+    for m in mounts {
+        // Each stat call gets its own short timeout.
+        let mount_path = m.mount.clone();
+        let stat_res = timeout(
+            Duration::from_millis(80),
+            tokio::task::spawn_blocking(move || statvfs_bytes(&mount_path)),
+        )
+        .await;
+
+        match stat_res {
+            Ok(Ok(Ok((size, used, free, used_pct)))) => {
+                let (status, message) = if used_pct >= 90.0 {
+                    ("crit", "disk usage above 90%")
+                } else if used_pct >= 80.0 {
+                    ("warn", "disk usage above 80%")
+                } else {
+                    ("ok", "")
+                };
+
+                out.push(AdminFilesystem {
+                    mount: m.mount,
+                    source: m.source,
+                    fstype: m.fstype,
+                    flags: m.flags,
+                    size_bytes: Some(size),
+                    used_bytes: Some(used),
+                    free_bytes: Some(free),
+                    used_pct: Some(used_pct),
+                    status: status.to_string(),
+                    message: message.to_string(),
+                });
+            }
+            Ok(Ok(Err(e))) => {
+                out.push(AdminFilesystem {
+                    mount: m.mount,
+                    source: m.source,
+                    fstype: m.fstype,
+                    flags: m.flags,
+                    size_bytes: None,
+                    used_bytes: None,
+                    free_bytes: None,
+                    used_pct: None,
+                    status: "unknown".to_string(),
+                    message: format!("statvfs failed: {e}"),
+                });
+            }
+            Ok(Err(join_err)) => {
+                out.push(AdminFilesystem {
+                    mount: m.mount,
+                    source: m.source,
+                    fstype: m.fstype,
+                    flags: m.flags,
+                    size_bytes: None,
+                    used_bytes: None,
+                    free_bytes: None,
+                    used_pct: None,
+                    status: "unknown".to_string(),
+                    message: format!("statvfs task failed: {join_err}"),
+                });
+            }
+            Err(_) => {
+                out.push(AdminFilesystem {
+                    mount: m.mount,
+                    source: m.source,
+                    fstype: m.fstype,
+                    flags: m.flags,
+                    size_bytes: None,
+                    used_bytes: None,
+                    free_bytes: None,
+                    used_pct: None,
+                    status: "unknown".to_string(),
+                    message: "statvfs timed out".to_string(),
+                });
+            }
+        }
+    }
+
+    // Stable sort so the UI doesn't jitter.
+    out.sort_by(|a, b| a.mount.cmp(&b.mount));
+    out
+}
+
+#[derive(Clone)]
+struct MountInfoRow {
+    mount: String,
+    source: String,
+    fstype: String,
+    flags: Vec<String>,
+}
+
+fn read_mountinfo() -> Vec<MountInfoRow> {
+    let s = match std::fs::read_to_string("/proc/self/mountinfo") {
+        Ok(s) => s,
+        Err(_) => return vec![],
+    };
+
+    let mut rows = Vec::new();
+    for line in s.lines() {
+        // Split "optional" fields from the fstype/source section.
+        let (left, right) = match line.split_once(" - ") {
+            Some(p) => p,
+            None => continue,
+        };
+
+        let left_fields: Vec<&str> = left.split_whitespace().collect();
+        if left_fields.len() < 6 {
+            continue;
+        }
+        let mount_point = left_fields[4];
+        let flags = left_fields[5]
+            .split(',')
+            .filter(|x| !x.is_empty())
+            .map(|x| x.to_string())
+            .collect::<Vec<_>>();
+
+        let right_fields: Vec<&str> = right.split_whitespace().collect();
+        if right_fields.len() < 2 {
+            continue;
+        }
+        let fstype = right_fields[0];
+        let source = right_fields[1];
+
+        rows.push(MountInfoRow {
+            mount: mount_point.to_string(),
+            source: source.to_string(),
+            fstype: fstype.to_string(),
+            flags,
+        });
+    }
+    rows
+}
+
+fn statvfs_bytes(path: &str) -> anyhow::Result<(u64, u64, u64, f32)> {
+    use std::ffi::CString;
+
+    let c_path = CString::new(path).map_err(|_| anyhow::anyhow!("invalid path"))?;
+    let mut vfs: libc::statvfs = unsafe { std::mem::zeroed() };
+
+    let rc = unsafe { libc::statvfs(c_path.as_ptr(), &mut vfs as *mut libc::statvfs) };
+    if rc != 0 {
+        return Err(anyhow::anyhow!("errno {}", std::io::Error::last_os_error()));
+    }
+
+    let frsize = if vfs.f_frsize > 0 { vfs.f_frsize } else { vfs.f_bsize } as u64;
+    let total = frsize.saturating_mul(vfs.f_blocks as u64);
+    let free = frsize.saturating_mul(vfs.f_bavail as u64);
+    let used = total.saturating_sub(free);
+    let used_pct = if total > 0 {
+        (used as f64 / total as f64 * 100.0) as f32
+    } else {
+        0.0
+    };
+
+    Ok((total, used, free, used_pct))
 }
 
 fn read_temp_c() -> anyhow::Result<Option<f32>> {
