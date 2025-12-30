@@ -18,7 +18,7 @@ const TARGET_LOG_LEN = 12;
 
 // NOTE: UI_VERSION is purely informational (tooltip on the header).
 // The authoritative running version is exposed by the backend at /api/v1/status.
-const UI_VERSION = "0.1.93";
+const UI_VERSION = "0.1.94";
 
 const state = {
   role: "operator",

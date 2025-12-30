@@ -3025,7 +3025,7 @@ async fn writer_playout(
 
             // Attempt a normal scan.
             let mut snapshot_to_persist: Option<Vec<LogItem>> = None;
-            let attempt = {
+            let mut attempt = {
                 let mut p = playout.write().await;
                 let attempt = topup_try(&mut p.log, &cfg).await;
                 if attempt.appended > 0 {
