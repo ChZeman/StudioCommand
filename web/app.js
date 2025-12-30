@@ -6,7 +6,7 @@
 const qs = (s) => document.querySelector(s);
 const qsa = (s) => Array.from(document.querySelectorAll(s));
 
-// Page mode (v0.1.89)
+// Page mode (v0.1.90)
 // We now serve multiple entrypoints:
 //   /remote -> producer UI
 //   /admin  -> administration UI
@@ -18,7 +18,7 @@ const TARGET_LOG_LEN = 12;
 
 // NOTE: UI_VERSION is purely informational (tooltip on the header).
 // The authoritative running version is exposed by the backend at /api/v1/status.
-const UI_VERSION = "0.1.89";
+const UI_VERSION = "0.1.90";
 
 const state = {
   role: "operator",

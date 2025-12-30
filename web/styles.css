@@ -12,6 +12,10 @@
   --sans: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, "Helvetica Neue", Arial, "Noto Sans", "Liberation Sans", sans-serif;
 }
 *{box-sizing:border-box}
+
+/* v0.1.90: Ensure the HTML [hidden] attribute actually hides elements.
+   Our .panel { display:flex } rule would otherwise override the UA stylesheet. */
+[hidden]{display:none !important;}
 html,body{height:100%}
 body{
   margin:0;
@@ -528,7 +532,7 @@ button.mini:disabled{ opacity: .35; cursor: default; }
 
 
 /* ============================================================
-   Admin tabs (v0.1.89)
+   Admin tabs (v0.1.90)
    Purpose: keep /admin a single page while letting us grow admin tooling.
    Design goals:
      - Simple horizontal tabs
