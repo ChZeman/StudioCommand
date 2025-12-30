@@ -1631,7 +1631,7 @@ async fn api_admin_system_v1_lite(State(st): State<AppState>) -> Json<AdminSyste
     // Host + load/memory via sysinfo. (sysinfo reports memory in KiB on some
     // platforms; we standardize to bytes by multiplying by 1024.)
     let mut sys = st.sys.lock().await;
-    sys.refresh_cpu();
+    sys.refresh_cpu_all();
     sys.refresh_memory();
     let la = sysinfo::System::load_average();
     let uptime_s = sysinfo::System::uptime();
@@ -3025,14 +3025,14 @@ async fn writer_playout(
 
             // Attempt a normal scan.
             let mut snapshot_to_persist: Option<Vec<LogItem>> = None;
-            let mut attempt = TopUpAttempt::default();
-            {
+            let attempt = {
                 let mut p = playout.write().await;
-                attempt = topup_try(&mut p.log, &cfg).await;
+                let attempt = topup_try(&mut p.log, &cfg).await;
                 if attempt.appended > 0 {
                     snapshot_to_persist = Some(p.log.clone());
                 }
-            }
+                attempt
+            };
 
             // If the configured directory exists but is empty (or scan/probe
             // fails), automatically try the installer-managed shared data path.
@@ -3045,14 +3045,14 @@ async fn writer_playout(
                     let mut cfg2 = cfg.clone();
                     cfg2.dir = fallback.clone();
 
-                    let mut attempt2 = TopUpAttempt::default();
-                    {
+                    let attempt2 = {
                         let mut p = playout.write().await;
-                        attempt2 = topup_try(&mut p.log, &cfg2).await;
+                        let attempt2 = topup_try(&mut p.log, &cfg2).await;
                         if attempt2.appended > 0 {
                             snapshot_to_persist = Some(p.log.clone());
                         }
-                    }
+                        attempt2
+                    };
 
                     if attempt2.appended > 0 {
                         tracing::warn!(
