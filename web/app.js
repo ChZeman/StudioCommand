@@ -18,7 +18,7 @@ const TARGET_LOG_LEN = 12;
 
 // NOTE: UI_VERSION is purely informational (tooltip on the header).
 // The authoritative running version is exposed by the backend at /api/v1/status.
-const UI_VERSION = "0.1.98";
+const UI_VERSION = "0.1.99";
 
 const state = {
   role: "operator",
@@ -1268,10 +1268,17 @@ function nowPosF(){
 
 function setClock(){
   const d = new Date();
-  qs("#clock").textContent = `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
-  const pos = nowPosF();
-  const ends = new Date(d.getTime() + (state.now.dur - pos)*1000);
-  qs("#npEnds").textContent = `Ends ${pad(ends.getHours())}:${pad(ends.getMinutes())}:${pad(ends.getSeconds())}`;
+  const clockEl = qs("#clock");
+  if(clockEl){
+    clockEl.textContent = `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  }
+  // Remote Studio shows an "Ends HH:MM:SS" readout; Admin pages do not.
+  const npEndsEl = qs("#npEnds");
+  if(npEndsEl){
+    const pos = nowPosF();
+    const ends = new Date(d.getTime() + (state.now.dur - pos)*1000);
+    npEndsEl.textContent = `Ends ${pad(ends.getHours())}:${pad(ends.getMinutes())}:${pad(ends.getSeconds())}`;
+  }
 }
 
 function openDrawer(which){

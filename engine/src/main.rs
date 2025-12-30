@@ -1635,8 +1635,12 @@ async fn api_admin_system_v1_lite(State(st): State<AppState>) -> Json<AdminSyste
     sys.refresh_memory();
     let la = sysinfo::System::load_average();
     let uptime_s = sysinfo::System::uptime();
-    let total_bytes = sys.total_memory().saturating_mul(1024);
-    let available_bytes = sys.available_memory().saturating_mul(1024);
+    let raw_total = sys.total_memory();
+    let raw_avail = sys.available_memory();
+    // sysinfo historically reported memory in KiB, but some builds report bytes.
+    // Heuristic: values above ~2e9 are almost certainly bytes (>= ~2 GB).
+    let total_bytes = if raw_total > 2_000_000_000 { raw_total } else { raw_total.saturating_mul(1024) };
+    let available_bytes = if raw_avail > 2_000_000_000 { raw_avail } else { raw_avail.saturating_mul(1024) };
     let used_bytes = total_bytes.saturating_sub(available_bytes);
 
     drop(sys);
