@@ -18,7 +18,7 @@ const TARGET_LOG_LEN = 12;
 
 // NOTE: UI_VERSION is purely informational (tooltip on the header).
 // The authoritative running version is exposed by the backend at /api/v1/status.
-const UI_VERSION = "0.1.94";
+const UI_VERSION = "0.1.95";
 
 const state = {
   role: "operator",
@@ -98,6 +98,13 @@ const state = {
     lastAt: 0,       // ms epoch of last meter update (any source)
     source: "",      // "DataChannel" | "HTTP" | "" (unknown)
   },
+  adminSystem: {
+    data: null,
+    lastAt: 0,
+    lastError: null,
+    // UI preference (stored in localStorage): show all mounts, including proc/sys/tmpfs, etc.
+    showAllMounts: false,
+  },
 };
 
 function pad(n){ return String(n).padStart(2,'0');}
@@ -127,6 +134,55 @@ function setBadge(sel, level, text){
   el.classList.add(level);
   el.textContent = text;
 }
+
+// --- Admin/System helpers (v0.1.95) -----------------------------------------
+// Keep these tiny and dependency-free: admin must remain fast + reliable in LIVE.
+//
+// NOTE: We intentionally prefer clarity over cleverness.
+// ----------------------------------------------------------------------------
+
+function bytesToHuman(n){
+  if(n === null || n === undefined) return "—";
+  if(typeof n !== "number" || !isFinite(n)) return "—";
+  const abs = Math.abs(n);
+  const UNITS = ["B","KiB","MiB","GiB","TiB","PiB"];
+  let u = 0;
+  let v = abs;
+  while(v >= 1024 && u < UNITS.length-1){
+    v /= 1024;
+    u++;
+  }
+  const sign = (n < 0) ? "-" : "";
+  // Use 0 decimals for bytes, 1 decimal otherwise (operator-friendly).
+  const txt = (u === 0) ? String(Math.round(v)) : v.toFixed(1);
+  return sign + txt + " " + UNITS[u];
+}
+
+function secondsToUptime(s){
+  if(typeof s !== "number" || !isFinite(s) || s < 0) return "—";
+  const sec = Math.floor(s);
+  const days = Math.floor(sec / 86400);
+  const hrs = Math.floor((sec % 86400) / 3600);
+  const mins = Math.floor((sec % 3600) / 60);
+  if(days > 0) return `${days}d ${hrs}h`;
+  if(hrs > 0) return `${hrs}h ${mins}m`;
+  return `${mins}m`;
+}
+
+function escapeHtml(s){
+  return String(s)
+    .replaceAll("&","&amp;")
+    .replaceAll("<","&lt;")
+    .replaceAll(">","&gt;")
+    .replaceAll('"',"&quot;")
+    .replaceAll("'","&#39;");
+}
+
+function pct1(x){
+  if(typeof x !== "number" || !isFinite(x)) return "—";
+  return `${x.toFixed(1)}%`;
+}
+
 
 function toast(msg){
   const el = document.createElement("div");
@@ -491,6 +547,158 @@ function upcomingIdsFromState(){
   // Reordering applies only to the *upcoming* items (log[1..]).
   return state.log.slice(1).map(it => it.id);
 }
+
+// Fetch Admin/System v1.0-lite snapshot.
+// This endpoint is designed to be safe to poll (non-blocking, time-boxed).
+async function fetchAdminSystem(){
+  if(SC_PAGE !== "admin") return;
+  try{
+    const r = await fetch("/api/v1/admin/system", { cache: "no-store" });
+    if(!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    state.adminSystem.data = data || null;
+    state.adminSystem.lastAt = Date.now();
+    state.adminSystem.lastError = null;
+  }catch(e){
+    state.adminSystem.lastError = (e && e.message) ? e.message : String(e);
+    // Keep prior data if available; admin UI should degrade gracefully.
+  }
+  renderAdminSystem();
+}
+
+function shouldShowMount(fs){
+  // "Important" mounts are what operators care about most.
+  // We default to showing:
+  //   - root (/)
+  //   - any /mnt or /media mounts (NAS, USB, etc.)
+  //   - common network mounts (cifs/nfs)
+  //   - /tmp (useful for temp space issues)
+  if(!fs || !fs.mount) return false;
+  const m = String(fs.mount);
+  const t = String(fs.fstype || "");
+  if(m === "/") return true;
+  if(m === "/tmp") return true;
+  if(m.startsWith("/mnt") || m.startsWith("/media")) return true;
+  if(["cifs","nfs","nfs4","smbfs"].includes(t)) return true;
+  return false;
+}
+
+function renderAdminSystem(){
+  if(SC_PAGE !== "admin") return;
+
+  const data = state.adminSystem.data;
+  const err = state.adminSystem.lastError;
+
+  // Small meta line
+  const meta = qs("#sysDiskMeta");
+  if(meta){
+    if(err) meta.textContent = `System API error: ${err}`;
+    else if(data && data.generated_at) meta.textContent = `Updated ${new Date(data.generated_at).toLocaleTimeString()}`;
+    else meta.textContent = "—";
+  }
+
+  // Engine card
+  const up = qs("#mUptime");
+  const cpu = qs("#mCpu");
+  const mem = qs("#mMem");
+  const disk = qs("#mDisk");
+
+  if(!data){
+    if(up) up.textContent = "—";
+    if(cpu) cpu.textContent = "—";
+    if(mem) mem.textContent = "—";
+    if(disk) disk.textContent = "—";
+  }else{
+    const uptime_s = data.server && typeof data.server.uptime_s === "number" ? data.server.uptime_s : null;
+    if(up) up.textContent = (uptime_s === null) ? "—" : secondsToUptime(uptime_s);
+
+    const load = data.host && data.host.cpu && data.host.cpu.load ? data.host.cpu.load : null;
+    if(cpu){
+      if(load && typeof load.one === "number" && typeof load.five === "number" && typeof load.fifteen === "number"){
+        cpu.textContent = `load ${load.one.toFixed(2)} / ${load.five.toFixed(2)} / ${load.fifteen.toFixed(2)}`;
+      }else{
+        cpu.textContent = "—";
+      }
+    }
+
+    const m = data.host && data.host.memory ? data.host.memory : null;
+    if(mem){
+      if(m && typeof m.total_bytes === "number" && typeof m.used_bytes === "number"){
+        mem.textContent = `${bytesToHuman(m.used_bytes)} / ${bytesToHuman(m.total_bytes)}`;
+      }else{
+        mem.textContent = "—";
+      }
+    }
+
+    // Root disk summary
+    let root = null;
+    const fss = data.storage && Array.isArray(data.storage.filesystems) ? data.storage.filesystems : [];
+    for(const fs of fss){
+      if(fs && fs.mount === "/"){ root = fs; break; }
+    }
+    if(disk){
+      if(root && typeof root.used_pct === "number" && typeof root.free_bytes === "number"){
+        disk.textContent = `${pct1(root.used_pct)} used • ${bytesToHuman(root.free_bytes)} free`;
+      }else{
+        disk.textContent = "—";
+      }
+    }
+  }
+
+  // Disks list (full-width card)
+  const disksEl = qs("#sysDisks");
+  if(!disksEl) return;
+
+  const fss = (data && data.storage && Array.isArray(data.storage.filesystems)) ? data.storage.filesystems : [];
+  const showAll = !!state.adminSystem.showAllMounts;
+
+  const shown = [];
+  for(const fs of fss){
+    if(!fs) continue;
+    if(showAll || shouldShowMount(fs)) shown.push(fs);
+  }
+
+  // Show important mounts first (stable ordering helps operators)
+  shown.sort((a,b) => {
+    const ai = shouldShowMount(a) ? 0 : 1;
+    const bi = shouldShowMount(b) ? 0 : 1;
+    if(ai !== bi) return ai - bi;
+    return String(a.mount||"").localeCompare(String(b.mount||""));
+  });
+
+  const total = fss.length;
+  const count = shown.length;
+
+  // Render as simple rows (table-free, fits existing styling).
+  const rows = [];
+  for(const fs of shown){
+    const mount = fs.mount || "—";
+    const fstype = fs.fstype || "—";
+    const src = fs.source || "—";
+    const used = (typeof fs.used_pct === "number") ? pct1(fs.used_pct) : "—";
+    const free = (typeof fs.free_bytes === "number") ? bytesToHuman(fs.free_bytes) : "—";
+    const label = `${mount} (${fstype})`;
+    const value = `${used} used • ${free} free`;
+    rows.push(`<div class="mon-row"><span title="${escapeHtml(src)}">${escapeHtml(label)}</span><span>${escapeHtml(value)}</span></div>`);
+  }
+
+  if(rows.length === 0){
+    disksEl.innerHTML = `<div class="muted">No disk information available yet.</div>`;
+  }else{
+    disksEl.innerHTML = rows.join("");
+  }
+
+  // Update meta count
+  if(meta && !err){
+    meta.textContent = `Showing ${count} of ${total} mounts`;
+  }
+
+  const toggle = qs("#sysMountToggle");
+  if(toggle){
+    toggle.textContent = showAll ? "Hide system mounts" : "Show system mounts";
+  }
+}
+
 
 async function postUpcomingReorder(upcomingIds){
   // The backend expects the full upcoming list, in the desired order.
@@ -1958,6 +2166,27 @@ function bootAdmin(){
 
   // Streaming output controls live here.
   wireStreamingControls();
+
+
+  // Admin/System UI preferences
+  try{
+    const v = localStorage.getItem("sc_admin_show_all_mounts");
+    state.adminSystem.showAllMounts = (v === "1");
+  }catch(_){}
+
+  const toggle = qs("#sysMountToggle");
+  if(toggle){
+    toggle.addEventListener("click", () => {
+      state.adminSystem.showAllMounts = !state.adminSystem.showAllMounts;
+      try{ localStorage.setItem("sc_admin_show_all_mounts", state.adminSystem.showAllMounts ? "1" : "0"); }catch(_){}
+      renderAdminSystem();
+    });
+  }
+
+  // Pull Admin/System snapshot (separate from /status; includes disk/mount table)
+  fetchAdminSystem();
+  setInterval(fetchAdminSystem, 2000);
+
 
   // Pull engine status + streaming state.
   fetchStatus();

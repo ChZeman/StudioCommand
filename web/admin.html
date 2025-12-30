@@ -59,6 +59,7 @@
             <div class="mon-title">Engine</div>
             <div class="mon-row"><span>Uptime</span><span id="mUptime">—</span></div>
             <div class="mon-row"><span>CPU</span><span id="mCpu">—</span></div>
+            <div class="mon-row"><span>Memory</span><span id="mMem">—</span></div>
             <div class="mon-row"><span>Disk</span><span id="mDisk">—</span></div>
           </div>
           <div class="mon-card">
@@ -79,6 +80,18 @@
             <div class="mon-row"><span>Worst loss</span><span id="mLoss">—</span></div>
             <div class="mon-row"><span>Mode</span><span id="mPriority">—</span></div>
           </div>
+
+          <div class="mon-card" style="grid-column:1 / -1;">
+            <div class="mon-title" style="display:flex; align-items:center; justify-content:space-between; gap:10px;">
+              <span>Disks & Mounts</span>
+              <span style="display:flex; align-items:center; gap:8px;">
+                <span class="muted" id="sysDiskMeta">—</span>
+                <button class="btn btn-mini btn-ghost" id="sysMountToggle" type="button">Show system mounts</button>
+              </span>
+            </div>
+            <div id="sysDisks" style="margin-top:6px;"></div>
+          </div>
+
         </div>
       </section>
 
@@ -204,6 +217,6 @@
     setActive(pickInitial(), {updateHash: true});
   })();
 </script>
-<script src="./app.js?v=0.1.94"></script>
+<script src="./app.js?v=0.1.95"></script>
 </body>
 </html>
